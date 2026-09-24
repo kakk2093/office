@@ -45,6 +45,12 @@ export class Input {
 		return this.pressed.delete(code);
 	}
 
+	/** Конец кадра: нажатия, которые в этом кадре никто не забрал, пропадают — иначе старое E (нажатое, когда
+	 * действовать было не на что) сработало бы само, как только появится доступное действие. */
+	endFrame(): void {
+		this.pressed.clear();
+	}
+
 	/** Забрать накопленное смещение мыши и обнулить его. */
 	consumeMouseDelta(): { x: number; y: number } {
 		const delta = { x: this.mouseDX, y: this.mouseDY };

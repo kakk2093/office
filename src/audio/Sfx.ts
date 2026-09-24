@@ -163,6 +163,182 @@ export class Sfx {
 		this._soft(t, 0.05, 600, 0.08);
 	}
 
+	/**
+	 * Поднос с посудой падает на кафель: глухой удар, резкий треск фаянса и россыпь звонких осколков,
+	 * пластиковый поднос дребезжит, подпрыгивая.
+	 */
+	crash(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+
+		const thud = this._noiseBurst(0.1);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = 280;
+		const thudGain = ctx.createGain();
+		thudGain.gain.setValueAtTime(1.0, t);
+		thudGain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+		thud.connect(low);
+		low.connect(thudGain);
+		thudGain.connect(ctx.destination);
+		thud.start(t);
+
+		// Треск: широкий высокий шум, быстро гаснет.
+		const smash = this._noiseBurst(0.4);
+		const high = ctx.createBiquadFilter();
+		high.type = 'highpass';
+		high.frequency.value = 1800;
+		const smashGain = ctx.createGain();
+		smashGain.gain.setValueAtTime(0.55, t);
+		smashGain.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
+		smash.connect(high);
+		high.connect(smashGain);
+		smashGain.connect(ctx.destination);
+		smash.start(t);
+
+		// Осколки: звонкие щелчки, гуще сразу после удара, реже к концу.
+		for (let i = 0; i < 18; i++) {
+			const delay = Math.random() ** 2 * 0.8;
+			const clink = this._noiseBurst(0.01);
+			const ring = ctx.createBiquadFilter();
+			ring.type = 'bandpass';
+			ring.frequency.value = 2600 + Math.random() * 4200;
+			ring.Q.value = 25;
+			const gain = ctx.createGain();
+			const level = 0.45 * (1 - delay);
+			gain.gain.setValueAtTime(level, t + delay);
+			gain.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.05 + Math.random() * 0.1);
+			clink.connect(ring);
+			ring.connect(gain);
+			gain.connect(ctx.destination);
+			clink.start(t + delay);
+		}
+
+		// Поднос подпрыгивает и дребезжит.
+		for (const [delay, level] of [
+			[0.14, 0.25],
+			[0.24, 0.15],
+			[0.3, 0.08],
+		] as const) {
+			const clack = this._noiseBurst(0.03);
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.frequency.value = 1200;
+			band.Q.value = 3;
+			const gain = ctx.createGain();
+			gain.gain.value = level;
+			clack.connect(band);
+			band.connect(gain);
+			gain.connect(ctx.destination);
+			clack.start(t + delay);
+		}
+	}
+
+	/**
+	 * Скример: обитая жестью дверь с грохотом распахивается — тяжёлый удар с металлическим звоном, низкий гул
+	 * и резкий диссонансный аккорд (кластер из полутонов), который, затухая, сползает вниз; поверх — визг-скрежет.
+	 * Всё через компрессор, чтобы громко, но без хрипа.
+	 */
+	scare(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		const out = ctx.createDynamicsCompressor();
+		out.threshold.value = -12;
+		out.ratio.value = 6;
+		const master = ctx.createGain();
+		master.gain.value = 0.9;
+		out.connect(master);
+		master.connect(ctx.destination);
+
+		// Удар створки.
+		const thud = this._noiseBurst(0.15);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = 220;
+		const thudGain = ctx.createGain();
+		thudGain.gain.setValueAtTime(1.4, t);
+		thudGain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+		thud.connect(low);
+		low.connect(thudGain);
+		thudGain.connect(out);
+		thud.start(t);
+		const hit = this._noiseBurst(0.02);
+		for (const [freq, level, decay] of [
+			[520, 0.8, 0.5],
+			[1350, 0.5, 0.35],
+			[2400, 0.3, 0.2],
+		] as const) {
+			const ring = ctx.createBiquadFilter();
+			ring.type = 'bandpass';
+			ring.frequency.value = freq;
+			ring.Q.value = 20;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(level * 3, t);
+			gain.gain.exponentialRampToValueAtTime(0.001, t + decay);
+			hit.connect(ring);
+			ring.connect(gain);
+			gain.connect(out);
+		}
+		hit.start(t);
+
+		// Низкий гул, проседающий вниз.
+		const sub = ctx.createOscillator();
+		sub.type = 'sine';
+		sub.frequency.setValueAtTime(58, t);
+		sub.frequency.exponentialRampToValueAtTime(34, t + 1.4);
+		const subGain = ctx.createGain();
+		subGain.gain.setValueAtTime(0.0001, t);
+		subGain.gain.linearRampToValueAtTime(0.7, t + 0.02);
+		subGain.gain.exponentialRampToValueAtTime(0.001, t + 1.6);
+		sub.connect(subGain);
+		subGain.connect(out);
+		sub.start(t);
+		sub.stop(t + 1.7);
+
+		// Аккорд-кластер: полутона рядом режут слух; фильтр закрывается, высота сползает.
+		const tone = ctx.createBiquadFilter();
+		tone.type = 'lowpass';
+		tone.frequency.setValueAtTime(5000, t);
+		tone.frequency.exponentialRampToValueAtTime(700, t + 2.2);
+		const toneGain = ctx.createGain();
+		toneGain.gain.setValueAtTime(0.0001, t);
+		toneGain.gain.linearRampToValueAtTime(0.5, t + 0.015);
+		toneGain.gain.exponentialRampToValueAtTime(0.001, t + 2.6);
+		tone.connect(toneGain);
+		toneGain.connect(out);
+		for (const freq of [110, 116.5, 155.6, 233.1, 246.9, 349.2]) {
+			const osc = ctx.createOscillator();
+			osc.type = 'sawtooth';
+			osc.frequency.setValueAtTime(freq, t);
+			osc.frequency.exponentialRampToValueAtTime(freq * 0.9, t + 2.4);
+			osc.detune.value = (Math.random() - 0.5) * 20;
+			const gain = ctx.createGain();
+			gain.gain.value = 0.18;
+			osc.connect(gain);
+			gain.connect(tone);
+			osc.start(t);
+			osc.stop(t + 2.7);
+		}
+
+		// Визг: узкая полоса шума скользит сверху вниз.
+		const screech = this._noiseBurst(1.0);
+		const band = ctx.createBiquadFilter();
+		band.type = 'bandpass';
+		band.Q.value = 12;
+		band.frequency.setValueAtTime(4200, t);
+		band.frequency.exponentialRampToValueAtTime(1400, t + 1.0);
+		const screechGain = ctx.createGain();
+		screechGain.gain.setValueAtTime(0.0001, t);
+		screechGain.gain.linearRampToValueAtTime(1.2, t + 0.02);
+		screechGain.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+		screech.connect(band);
+		band.connect(screechGain);
+		screechGain.connect(out);
+		screech.start(t);
+	}
+
 	/** Кусок хлеба кладут на поднос: мягкий короткий шорох. */
 	bread(): void {
 		const ctx = this._context();

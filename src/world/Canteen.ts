@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { CircleColliders } from '../physics/CircleColliders.js';
+import type { CircleColliders, Circle } from '../physics/CircleColliders.js';
 import type { RoomBounds } from './Room.js';
 import {
 	createCanteenDoor,
@@ -38,6 +38,7 @@ import {
 	createFloorTileTexture,
 	createWallTileTexture,
 	createCanteenWindow,
+	createBowlShards,
 	TABLE_HEIGHT,
 	COUNTER_HEIGHT,
 	COUNTER_DEPTH,
@@ -129,8 +130,10 @@ const TRAY_ON_TABLE_OFFSET = 0.2;
 /** Кассир сидит за стойкой — до её лица дальше, чем до предметов на прилавке. */
 const CASHIER_REACH = 2.5;
 
-/** Касса — сразу за концом прилавка. */
+/** Касса — сразу за концом прилавка. В катсцене она исчезает, и на её месте — проход за прилавок. */
 const CASH_X = 4.3;
+/** Коллайдеры ряда у прилавка восточнее этого X перекрывают проход. */
+const PASSAGE_FROM_X = COUNTER_X2 - 0.2;
 /** Табурет кассира — за стойкой, в её локальных координатах. */
 const CASHIER_SEAT_Z = -0.72;
 /** Раздатчица — у первого, между кастрюлями: черпает из правой (для неё) и наливает в тарелку перед собой. */
@@ -148,9 +151,9 @@ const TABLE_STEP = 1.8;
 const STOOL_OFFSET = 0.62;
 const STOOL_COLORS = ['#7a4a2a', '#6a2e2a', '#7a4a2a', '#3f4f5a'];
 
-/** Столы для грязной посуды — напротив раздачи, по бокам прохода (сам проход свободен). */
+/** Стол для грязной посуды — напротив раздачи, слева от прохода (справа — свободно: там стол, за который садимся). */
 const RETURN_Z = -4.3;
-const RETURN_X = [-4.2, 4.2];
+const RETURN_X = -4.2;
 const RETURN_LENGTH = 2.4;
 
 /** Окна в боковых стенах зала — между рядами столов, задёрнуты плотными шторами. */
@@ -186,15 +189,40 @@ export const BITE_TIME = 1.4;
 export const BITE_AT_MOUTH = 0.5;
 /**
  * Катсцена после последней ложки (с): пауза → встать (камера поднимается и отходит от стола) →
- * взять поднос со стола в руки → развернуться назад. Потом управление возвращается игроку.
+ * взять поднос со стола в руки → развернуться через правое плечо к пустой раздаче → поднос падает, тряска.
+ * Потом управление возвращается игроку.
  */
 const CUTSCENE_PAUSE = 0.6;
 const CUTSCENE_STAND = 1.2;
 const CUTSCENE_TAKE = 0.8;
-const CUTSCENE_TURN = 1.4;
+const CUTSCENE_TURN = 2.4;
+/**
+ * Обернулись — у раздачи темно (CUTSCENE_DARK), потом дверь распахивается за DOOR_SLAM и загорается
+ * красный свет; через CUTSCENE_REACT поднос выпадает из рук. Тряска камеры — от хлопка двери и от удара подноса.
+ */
+const CUTSCENE_DARK = 1.4;
+const DOOR_SLAM = 0.12;
+const CUTSCENE_REACT = 0.9;
+const SLAM_SHAKE = 0.5;
+const CUTSCENE_SHAKE = 0.9;
+const SHAKE_OFFSET = 0.035;
+const SHAKE_ANGLE = 0.035;
+const GRAVITY = 9.8;
 /** Насколько отходим от табуретки, вставая (от стола), м. */
 const STAND_BACK = 0.6;
 const STANDING_EYE_Y = 1.7;
+
+/** Дверь за раздачей (петли слева, открывается в зал); за ней — пустота, залитая красным светом. */
+const KITCHEN_DOOR_X = 1.4;
+const KITCHEN_DOOR_WIDTH = 0.9;
+const KITCHEN_DOOR_HEIGHT = 2.05;
+const KITCHEN_DOOR_OPEN = -1.75;
+const KITCHEN_ROOM = { width: 3, depth: 3, height: 2.8 };
+/** Кровавый свет из-за двери: цвет света в зале, цвет самой пустоты (слепяще-яркий) и яркость; первые мгновения мигает. */
+const BLOOD = new THREE.Color('#ff1020');
+const BLOOD_GLARE = new THREE.Color('#ff3030');
+const KITCHEN_LIGHT = 30;
+const FLICKER_TIME = 0.35;
 
 /** Входная дверь в южной стене; створка при выходе открывается наружу (от игрока). */
 const DOOR_Z = SOUTH_Z - WALL_THICKNESS / 2 - 0.05;
@@ -262,6 +290,26 @@ export class Canteen {
 	/** Багровость света: текущая (плавно догоняет) и целевая (растёт с каждой ложкой после MUSIC_FADE_BITE). */
 	private darkness = 0;
 	private darknessTarget = 0;
+	/** Дверь за раздачей (группа на петле), красный свет из-за неё и сама пустота за ней (без освещения — ровная заливка). */
+	private kitchenDoor!: THREE.Group;
+	private kitchenLight!: THREE.PointLight;
+	private readonly voidMaterial = new THREE.MeshBasicMaterial({ color: '#000000', side: THREE.BackSide });
+	/** Время с момента, когда дверь распахнулась, с (−1 — ещё закрыта). */
+	private slamTime = -1;
+	/** Касса со стойкой, табуретом и кассиром — исчезает в катсцене. */
+	private cashDesk!: THREE.Group;
+	/** Коллайдеры, перекрывающие проход за прилавок на месте кассы. */
+	private readonly passageColliders: Circle[] = [];
+	/** Хлеб на подносе — при падении разлетается по полу. */
+	private readonly trayBread: THREE.Group[] = [];
+	/** Поднос выронили: летит (trayFalling) и лежит на полу; crashTime — с удара, с (−1 — ещё не упал). */
+	private trayDropped = false;
+	private trayFalling = false;
+	private readonly trayVelocity = new THREE.Vector3();
+	private crashTime = -1;
+	/** Game играет звук разбитой посуды и страшный звук распахнувшейся двери. */
+	onTrayCrash: (() => void) | null = null;
+	onDoorSlam: (() => void) | null = null;
 	private readonly focusDir = new THREE.Vector3();
 	private readonly focusTo = new THREE.Vector3();
 
@@ -303,10 +351,15 @@ export class Canteen {
 
 	/**
 	 * Текущий шаг цепочки — первое, что ещё не сделано: текст задачи и точка над предметом для маркера HUD.
-	 * null — всё сделано.
+	 * null — задачи нет (например, идёт катсцена).
 	 */
 	get objective(): { text: string; at: THREE.Vector3 | null } | null {
 		const at = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+		// После катсцены — к распахнутой красной двери.
+		// TODO: переход в следующую сцену через эту дверь пока не сделан — маркер ведёт к ней, но у двери ничего
+		// не происходит (и зайти за неё нельзя: не пускает граница зала). Реализуем позже.
+		if (this.finished) return { text: 'Подойди к двери', at: at(KITCHEN_DOOR_X, KITCHEN_DOOR_HEIGHT + 0.2, NORTH_Z + WALL_THICKNESS / 2) };
+		if (this.trayDropped) return null;
 		if (!this.trayHeld) return { text: 'Возьми поднос', at: at(TRAY_STACK_POS.x, COUNTER_TOP + 0.25, TRAY_STACK_POS.z) };
 		if (this.breadOnTray < BREAD_PER_TRAY) {
 			return { text: `Возьми хлеб (${this.breadOnTray}/${BREAD_PER_TRAY})`, at: at(BREAD_POS.x, COUNTER_TOP + 0.08, BREAD_POS.z) };
@@ -329,6 +382,7 @@ export class Canteen {
 	 * взять поднос, затем положить на него хлеб. null — ничего подходящего.
 	 */
 	interaction(camera: THREE.Camera): Interaction | null {
+		if (this.trayDropped) return null;
 		const spots: { x: number; y: number; z: number; reach?: number; get: () => Interaction | null }[] = [
 			{ ...TRAY_STACK_POS, y: COUNTER_TOP + 0.1, get: () => this._trayInteraction() },
 			{ ...BREAD_POS, y: COUNTER_TOP + 0.03, get: () => this._breadInteraction() },
@@ -339,7 +393,7 @@ export class Canteen {
 			{ x: this.cashierHead.x, y: this.cashierHead.y, z: this.cashierHead.z, reach: CASHIER_REACH, get: () => this._cashierInteraction() },
 		];
 		if (this.targetTable) {
-			spots.push({ x: this.targetTable.x, y: TABLE_HEIGHT, z: this.targetTable.z, reach: 2.2, get: () => this._tableInteraction(camera) });
+			spots.push({ x: this.targetTable.x, y: TABLE_HEIGHT, z: this.targetTable.z, reach: 2.2, get: () => this._tableInteraction() });
 		}
 		camera.getWorldDirection(this.focusDir);
 		let best: Interaction | null = null;
@@ -424,6 +478,11 @@ export class Canteen {
 		return this.seated && this.bites < BITES_TO_FINISH;
 	}
 
+	/** Катсцена после еды позади: поднос разбит, управление снова у игрока. */
+	get finished(): boolean {
+		return this.trayDropped && !this.cutsceneActive;
+	}
+
 	get finishedEating(): boolean {
 		return this.bites >= BITES_TO_FINISH;
 	}
@@ -434,8 +493,28 @@ export class Canteen {
 		if (!this.canEat) return this.bites;
 		this.bites++;
 		this.biteTime = 0;
+		this._eatBread();
 		this.darknessTarget = THREE.MathUtils.clamp((this.bites - MUSIC_FADE_BITE) / (BITES_TO_FINISH - MUSIC_FADE_BITE), 0, 1);
 		return this.bites;
+	}
+
+	/**
+	 * Хлеб едят вприкуску: куски по очереди, каждый — за равную долю ложек. Кусок убывает с одного края
+	 * (дальний край остаётся на месте), доеденный — пропадает.
+	 */
+	private _eatBread(): void {
+		const perSlice = BITES_TO_FINISH / this.trayBread.length;
+		this.trayBread.forEach((slice, i) => {
+			const left = THREE.MathUtils.clamp(1 - (this.bites - i * perSlice) / perSlice, 0, 1);
+			if (left === 1) return;
+			// Исходное место куска на подносе — в userData, чтобы сдвигать от него, а не накапливать.
+			const origin: THREE.Vector3 = (slice.userData.origin ??= slice.position.clone());
+			slice.visible = left > 0;
+			if (!slice.visible) return;
+			slice.scale.x = left;
+			slice.position.copy(origin);
+			slice.translateX(-(1 - left) * 0.05);
+		});
 	}
 
 	/** Ложка в тарелку → с солянкой ко рту (к камере сидящего) → обратно на поднос. Координаты — подноса на столе. */
@@ -520,8 +599,8 @@ export class Canteen {
 		return best;
 	}
 
-	/** Стол после оплаты: сесть на табуретку с ближней к игроку стороны (поднос — на стол) или встать. */
-	private _tableInteraction(camera: THREE.Camera): Interaction | null {
+	/** Стол после оплаты: сесть на табуретку спиной к кассе (поднос — на стол). */
+	private _tableInteraction(): Interaction | null {
 		const table = this.targetTable;
 		if (!table) return null;
 		// Сидя — никаких действий у стола: встаём сами, катсценой после последней ложки.
@@ -530,9 +609,9 @@ export class Canteen {
 			text: 'сесть',
 			sound: 'tray',
 			run: () => {
-				// Сторона стола, ближайшая к игроку: там и табуретка, с неё смотрим на центр стола.
-				const dx = camera.position.x - table.x;
-				const dz = camera.position.z - table.z;
+				// Садимся всегда спиной к кассе: табуретка — со стороны стола, ближайшей к кассе, с неё смотрим на центр стола.
+				const dx = this.cashierHead.x - table.x;
+				const dz = this.cashierHead.z - table.z;
 				const [sx, sz] = Math.abs(dx) > Math.abs(dz) ? [Math.sign(dx), 0] : [0, Math.sign(dz)];
 				const yaw = Math.atan2(sx, sz);
 				this.seated = true;
@@ -593,6 +672,7 @@ export class Canteen {
 				slice.position.set(x, 0.008 + this.breadOnTray * 0.004, z);
 				slice.rotation.y = this.breadOnTray * 0.5 - 0.2;
 				this.heldTray.add(slice);
+				this.trayBread.push(slice);
 				this.breadOnTray++;
 			},
 		};
@@ -621,13 +701,18 @@ export class Canteen {
 	}
 
 	/**
-	 * Катсцена после еды: встать (подняться и отойти от стола), взять поднос в руки, развернуться назад.
+	 * Катсцена после еды: встать (подняться и отойти от стола), взять поднос в руки, развернуться назад —
+	 * а за спиной раздача пуста, с кухни льётся кровавый свет. Поднос падает из рук, посуда бьётся, камеру трясёт.
 	 * Камеру ставит Game по onCameraPose; в конце — onStand, дальше управляет игрок.
 	 */
 	private _updateCutscene(dt: number): void {
 		const seat = this.seat;
 		if (this.cutsceneTime < 0 || !seat) return;
+		// Пока игрок сидит спиной к раздаче — всё меняется незаметно.
+		if (this.cutsceneTime === 0) this._emptyHall();
 		this.cutsceneTime += dt;
+		if (this.crashTime >= 0) this.crashTime += dt;
+		if (this.slamTime >= 0) this.slamTime += dt;
 		const t = this.cutsceneTime;
 		const ease = (x: number) => {
 			const c = THREE.MathUtils.clamp(x, 0, 1);
@@ -644,21 +729,107 @@ export class Canteen {
 		const z = seat.z + backZ * STAND_BACK * stand;
 		const y = THREE.MathUtils.lerp(seat.eyeY, STANDING_EYE_Y, stand);
 		const pitch = THREE.MathUtils.lerp(THREE.MathUtils.lerp(-0.45, -0.3, stand), 0, turn);
-		const yaw = seat.yaw + Math.PI * turn;
+		// Разворот через правое плечо.
+		const yaw = seat.yaw - Math.PI * turn;
 		this.trayPickup = take;
-		this.onCameraPose?.({ x, y, z, yaw, pitch });
 
-		if (t >= CUTSCENE_PAUSE + CUTSCENE_STAND + CUTSCENE_TAKE + CUTSCENE_TURN) {
+		// Обернулись — темно; дверь распахивается, загорается красный свет.
+		const slamAt = CUTSCENE_PAUSE + CUTSCENE_STAND + CUTSCENE_TAKE + CUTSCENE_TURN + CUTSCENE_DARK;
+		if (t >= slamAt && this.slamTime < 0) {
+			this.slamTime = 0;
+			this._openKitchenDoor();
+		}
+		this._updateKitchenDoor();
+
+		// Испугались — поднос выскальзывает из рук и падает к ногам.
+		if (t >= slamAt + CUTSCENE_REACT && this.trayHeld) {
+			this.trayHeld = false;
+			this.trayDropped = true;
+			this.trayFalling = true;
+			this.trayVelocity.set(Math.sin(yaw) * 0.35, 0.3, Math.cos(yaw) * 0.35);
+		}
+
+		// Тряска: вздрогнули от хлопка двери (слабее) и от удара подноса; обе быстро затухают.
+		const fade = (time: number, duration: number) => (time < 0 ? 0 : (1 - Math.min(1, time / duration)) ** 2);
+		const a = 0.5 * fade(this.slamTime, SLAM_SHAKE) + fade(this.crashTime, CUTSCENE_SHAKE);
+		const shakeX = Math.sin(t * 71) * SHAKE_OFFSET * a;
+		const shakeY = Math.sin(t * 53 + 1) * SHAKE_OFFSET * a;
+		const shakeYaw = Math.sin(t * 47 + 2) * SHAKE_ANGLE * a;
+		const shakePitch = Math.sin(t * 61 + 3) * SHAKE_ANGLE * a;
+		this.onCameraPose?.({ x: x + shakeX, y: y + shakeY, z, yaw: yaw + shakeYaw, pitch: pitch + shakePitch });
+
+		if (this.crashTime >= CUTSCENE_SHAKE) {
 			this.cutsceneTime = -1;
 			this.seated = false;
-			this.trayPickup = 1;
+			this.onCameraPose?.({ x, y, z, yaw, pitch });
 			this.onStand?.(x, z);
 		}
 	}
 
-	/** Открыть створку при выходе (переход прячет смену сцены). */
-	openDoor(): void {
-		this.door.open();
+	/**
+	 * Начало катсцены, пока игрок сидит спиной к раздаче: раздатчица и касса с кассиром исчезают
+	 * (на месте кассы — проход за прилавок, к двери).
+	 */
+	private _emptyHall(): void {
+		this.dinnerLady.group.visible = false;
+		this.cashDesk.visible = false;
+		for (const circle of this.passageColliders) this.colliders.remove(circle);
+	}
+
+	/** Дверь распахивается: звук, коллайдеры открытой створки (она стоит поперёк стены — сквозь неё не пройти). */
+	private _openKitchenDoor(): void {
+		this.onDoorSlam?.();
+		const { x, z } = this.kitchenDoor.position;
+		for (const d of [0.3, 0.7]) {
+			this.colliders.add(x + Math.cos(KITCHEN_DOOR_OPEN) * d, z - Math.sin(KITCHEN_DOOR_OPEN) * d, 0.12);
+		}
+	}
+
+	/** Створка резко распахивается и отскакивает; свет за ней вспыхивает, мигает и горит ровно. */
+	private _updateKitchenDoor(): void {
+		const s = this.slamTime;
+		if (s < 0) return;
+		const swing = Math.min(1, s / DOOR_SLAM);
+		const after = s - DOOR_SLAM;
+		const bounce = after > 0 ? Math.sin(after * 30) * 0.12 * Math.exp(-after * 6) : 0;
+		this.kitchenDoor.rotation.y = KITCHEN_DOOR_OPEN * (1 - (1 - swing) ** 3) - bounce;
+		const on = s > FLICKER_TIME || Math.sin(s * 70) > -0.2 ? 1 : 0.15;
+		this.kitchenLight.intensity = KITCHEN_LIGHT * on;
+		this.voidMaterial.color.copy(BLOOD_GLARE).multiplyScalar(on);
+	}
+
+	/** Поднос летит по параболе и кувыркается; об пол — тарелка вдребезги, хлеб и ложка разлетаются. */
+	private _updateFallingTray(dt: number): void {
+		if (!this.trayFalling) return;
+		const tray = this.heldTray;
+		this.trayVelocity.y -= GRAVITY * dt;
+		tray.position.addScaledVector(this.trayVelocity, dt);
+		// Ближний край уходит вниз, поднос заваливается набок.
+		tray.rotation.x += 2.5 * dt;
+		tray.rotation.z += 1.2 * dt;
+		if (tray.position.y > 0.005) return;
+
+		this.trayFalling = false;
+		tray.position.y = 0.005;
+		tray.rotation.set(0, tray.rotation.y + 0.4, 0.06, 'YXZ');
+		tray.updateMatrixWorld(true);
+
+		const impact = this.soupBowl.getWorldPosition(new THREE.Vector3());
+		this.soupBowl.removeFromParent();
+		this._add(createBowlShards(), impact.x, 0, impact.z, Math.random() * Math.PI * 2);
+
+		// Хлеб и ложка слетают с подноса на пол, рядом.
+		const scatter = (obj: THREE.Object3D, distance: number, y: number) => {
+			this.scene.attach(obj);
+			const angle = Math.random() * Math.PI * 2;
+			obj.position.set(obj.position.x + Math.cos(angle) * distance, y, obj.position.z + Math.sin(angle) * distance);
+			obj.rotation.set(0, Math.random() * Math.PI * 2, 0);
+		};
+		this.trayBread.forEach((slice, i) => scatter(slice, 0.2 + i * 0.15, 0));
+		if (this.traySpoon) scatter(this.traySpoon, 0.3, 0);
+
+		this.crashTime = 0;
+		this.onTrayCrash?.();
 	}
 
 	/** Вернуть створку в закрытое положение — при входе в столовую. */
@@ -680,6 +851,7 @@ export class Canteen {
 		this._updateCutscene(dt);
 		// После катсцены: камера уже в позе этого кадра — поднос встаёт перед ней.
 		this._updateHeldTray(camera);
+		this._updateFallingTray(dt);
 		this._updateDarkness(dt);
 		this.cashier.update(dt);
 	}
@@ -713,9 +885,13 @@ export class Canteen {
 		this.scene.add(ceiling);
 
 		const paint = new THREE.MeshStandardMaterial({ color: '#e6dcbc' });
+		// Северная стена — с дверным проёмом: слева и справа от него и перемычка над ним.
+		const doorL = KITCHEN_DOOR_X - KITCHEN_DOOR_WIDTH / 2;
+		const doorR = KITCHEN_DOOR_X + KITCHEN_DOOR_WIDTH / 2;
 		const walls: [number, number, number, number][] = [
 			// [x, z, длина, поворот]: длина — вдоль стены.
-			[0, NORTH_Z, WIDTH, 0],
+			[(doorL - WIDTH / 2) / 2, NORTH_Z, doorL + WIDTH / 2, 0],
+			[(doorR + WIDTH / 2) / 2, NORTH_Z, WIDTH / 2 - doorR, 0],
 			[0, SOUTH_Z, WIDTH, 0],
 			[-WIDTH / 2, CENTER_Z, DEPTH, Math.PI / 2],
 			[WIDTH / 2, CENTER_Z, DEPTH, Math.PI / 2],
@@ -727,28 +903,38 @@ export class Canteen {
 			wall.receiveShadow = true;
 			this.scene.add(wall);
 		}
+		const lintel = new THREE.Mesh(new THREE.BoxGeometry(KITCHEN_DOOR_WIDTH, HEIGHT - KITCHEN_DOOR_HEIGHT, WALL_THICKNESS), paint);
+		lintel.position.set(KITCHEN_DOOR_X, (HEIGHT + KITCHEN_DOOR_HEIGHT) / 2, NORTH_Z);
+		this.scene.add(lintel);
 
 		// За раздачей — кафель; в зале — панель масляной краской до TILE_HEIGHT с тёмной полосой-бордюром.
 		const inner = WALL_THICKNESS / 2 + FINISH;
-		const tiles = createWallTileTexture();
-		tiles.repeat.set(WIDTH / (WALL_TILE * 2), BACK_TILE_HEIGHT / (WALL_TILE * 2));
-		const tileMat = new THREE.MeshStandardMaterial({ map: tiles, roughness: 0.35 });
+		// Кафель за раздачей — тремя кусками вокруг проёма; сдвиг текстуры — чтобы швы шли как по целой стене.
+		const tileBand = (x1: number, x2: number, bottom: number): void => {
+			const tiles = createWallTileTexture();
+			tiles.repeat.set((x2 - x1) / (WALL_TILE * 2), (BACK_TILE_HEIGHT - bottom) / (WALL_TILE * 2));
+			tiles.offset.set((x1 + WIDTH / 2) / (WALL_TILE * 2), bottom / (WALL_TILE * 2));
+			const material = new THREE.MeshStandardMaterial({ map: tiles, roughness: 0.35 });
+			this._wallBand((x1 + x2) / 2, NORTH_Z + inner, x2 - x1, BACK_TILE_HEIGHT - bottom, 0, material, bottom);
+		};
+		tileBand(-WIDTH / 2, doorL, 0);
+		tileBand(doorR, WIDTH / 2, 0);
+		tileBand(doorL, doorR, KITCHEN_DOOR_HEIGHT);
 		const oilPaint = new THREE.MeshStandardMaterial({ color: '#8fae9f', roughness: 0.4 });
-		this._wallBand(0, NORTH_Z + inner, WIDTH, BACK_TILE_HEIGHT, 0, tileMat);
 		this._wallBand(0, SOUTH_Z - inner, WIDTH, TILE_HEIGHT, Math.PI, oilPaint);
 		this._wallBand(-WIDTH / 2 + inner, CENTER_Z, DEPTH, TILE_HEIGHT, Math.PI / 2, oilPaint);
 		this._wallBand(WIDTH / 2 - inner, CENTER_Z, DEPTH, TILE_HEIGHT, -Math.PI / 2, oilPaint);
 	}
 
-	/** Полоса отделки стены от пола до height с бордюром поверху. rotY — плоскость смотрит в зал. */
-	private _wallBand(x: number, z: number, length: number, height: number, rotY: number, material: THREE.Material): void {
+	/** Полоса отделки стены высотой height от bottom (по умолчанию от пола) с бордюром поверху. rotY — плоскость смотрит в зал. */
+	private _wallBand(x: number, z: number, length: number, height: number, rotY: number, material: THREE.Material, bottom = 0): void {
 		const band = new THREE.Mesh(new THREE.PlaneGeometry(length, height), material);
-		band.position.set(x, height / 2, z);
+		band.position.set(x, bottom + height / 2, z);
 		band.rotation.y = rotY;
 		band.receiveShadow = true;
 		this.scene.add(band);
 		const border = new THREE.Mesh(new THREE.BoxGeometry(length, 0.05, MOUNT), new THREE.MeshStandardMaterial({ color: '#4f6f62', roughness: 0.35 }));
-		border.position.set(x, height + 0.025, z);
+		border.position.set(x, bottom + height + 0.025, z);
 		border.rotation.y = rotY;
 		this.scene.add(border);
 	}
@@ -897,6 +1083,7 @@ export class Canteen {
 		this._add(kassa, CASH_X, 0, COUNTER_Z, -0.25);
 		kassa.updateMatrixWorld(true);
 		this.cashierHead.set(0, SEATED_EYE_Y + 0.05, 0).applyMatrix4(this.cashier.group.matrixWorld);
+		this.cashDesk = kassa;
 
 		// Раздатчица — за мармитом, лицом к посетителям.
 		this._add(this.dinnerLady.group, DINNER_LADY_X, 0, DINNER_LADY_Z);
@@ -909,7 +1096,10 @@ export class Canteen {
 		// Посетителю за прилавок не пройти: ряд коллайдеров по всей линии, от стены до стены,
 		// с запасом до направляющих — к ним можно подойти вплотную.
 		const railZ = COUNTER_Z + COUNTER_DEPTH / 2 + TRAY_RAIL_OFFSET;
-		for (let x = -WIDTH / 2; x <= WIDTH / 2 + 0.01; x += 0.5) this.colliders.add(x, railZ - 0.35, 0.36);
+		for (let x = -WIDTH / 2; x <= WIDTH / 2 + 0.01; x += 0.5) {
+			const circle = this.colliders.add(x, railZ - 0.35, 0.36);
+			if (x > PASSAGE_FROM_X) this.passageColliders.push(circle);
+		}
 	}
 
 	/** Холодные закуски в витрине: салаты на блюдцах, хлеб, сметана в стаканах. */
@@ -979,29 +1169,41 @@ export class Canteen {
 			}
 		}
 		this._add(createWaterBoiler(), (x1 + x2) / 2, 0, NORTH_Z + 0.9);
+		this.colliders.add((x1 + x2) / 2, NORTH_Z + 0.9, 0.3);
 	}
 
-	/** Задняя стена за раздачей: стеллаж с посудой, окно выдачи с кухни, дверь на кухню, лозунг под потолком. */
+	/** Задняя стена за раздачей: стеллаж с посудой, дверь с комнатой за ней, лозунг под потолком. */
 	private _buildBackWall(): void {
 		const face = NORTH_MOUNT;
 		this._add(createDishRack(1.6), -3.6, 0, face + 0.25);
 
-		// Окно выдачи с кухни: тёмный проём со стальным подоконником, в глубине — тёплый свет кухни.
-		const hatch = new THREE.Mesh(
-			new THREE.PlaneGeometry(1.4, 0.8),
-			new THREE.MeshStandardMaterial({ color: '#3a3228', emissive: '#4a3a24', emissiveIntensity: 0.6 })
+		// Дверь — обитая жестью, с табличкой; петли слева, в катсцене распахивается в зал.
+		this.kitchenDoor = new THREE.Group();
+		this.kitchenDoor.position.set(KITCHEN_DOOR_X - KITCHEN_DOOR_WIDTH / 2, 0, face + 0.03);
+		this.scene.add(this.kitchenDoor);
+		const leaf = new THREE.Mesh(
+			new THREE.BoxGeometry(KITCHEN_DOOR_WIDTH, KITCHEN_DOOR_HEIGHT, 0.05),
+			new THREE.MeshStandardMaterial({ color: '#b8b9b4', roughness: 0.5, metalness: 0.3 })
 		);
-		hatch.position.set(-0.6, 1.4, face + 0.02);
-		this.scene.add(hatch);
-		const sill = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.04, 0.35), new THREE.MeshStandardMaterial({ color: '#c3c7c9', roughness: 0.35, metalness: 0.6 }));
-		sill.position.set(-0.6, 1.0, face + 0.17);
-		this.scene.add(sill);
-		for (let i = 0; i < 3; i++) this._add(createPlateStack(5 + i * 2, i === 1), -1.1 + i * 0.4, 1.02, face + 0.2);
+		leaf.position.set(KITCHEN_DOOR_WIDTH / 2, KITCHEN_DOOR_HEIGHT / 2, 0);
+		this.kitchenDoor.add(leaf);
 
-		// Дверь на кухню — обитая жестью, с табличкой.
-		const kitchenDoor = new THREE.Mesh(new THREE.BoxGeometry(0.9, 2.05, 0.05), new THREE.MeshStandardMaterial({ color: '#b8b9b4', roughness: 0.5, metalness: 0.3 }));
-		kitchenDoor.position.set(1.4, 1.025, face + 0.03);
-		this.scene.add(kitchenDoor);
+		// За дверью — пустота: коробка, видимая изнутри, ровно залитая слепящим красным (ни углов, ни теней — не понять,
+		// что там). Свет в зал — от проёма; добавлен сразу с нулевой яркостью: новая лампа посреди катсцены
+		// пересобрала бы шейдеры.
+		const { width, depth, height } = KITCHEN_ROOM;
+		const room = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), this.voidMaterial);
+		room.position.set(KITCHEN_DOOR_X, height / 2, NORTH_Z - WALL_THICKNESS / 2 - depth / 2);
+		this.scene.add(room);
+		this.kitchenLight = new THREE.PointLight(BLOOD, 0, 18, 1.4);
+		this.kitchenLight.position.set(KITCHEN_DOOR_X, 1.3, NORTH_Z - WALL_THICKNESS / 2 - 0.3);
+		this.scene.add(this.kitchenLight);
+
+		// За прилавком (туда попадают только через проход на месте кассы): задняя сторона прилавка и столика с подносами,
+		// стеллаж, титан (его коллайдер — в _buildDrinks).
+		for (let x = -WIDTH / 2 + 0.3; x <= COUNTER_X2 - 0.1 + 0.01; x += 0.4) this.colliders.add(x, COUNTER_Z - 0.15, 0.2);
+		this.colliders.add(COUNTER_X2 - 0.1, COUNTER_Z, 0.2);
+		for (const x of [-4.2, -3.6, -3.0]) this.colliders.add(x, face + 0.25, 0.3);
 		const staff = createPoster(
 			createTextTexture(['ПОСТОРОННИМ', 'ВХОД', 'ВОСПРЕЩЁН'], {
 				width: 48,
@@ -1014,8 +1216,9 @@ export class Canteen {
 			}),
 			0.28
 		);
-		// Табличка — на лицевой стороне двери (полотно толщиной 0.05 стоит в face + 0.03).
-		this._add(staff, 1.4, 1.6, face + 0.055);
+		// Табличка — на лицевой стороне створки (толщина полотна 0.05), открывается вместе с ней.
+		staff.position.set(KITCHEN_DOOR_WIDTH / 2, 1.6, 0.025);
+		this.kitchenDoor.add(staff);
 
 		const slogan = createPoster(
 			createTextTexture(['ПРИЯТНОГО АППЕТИТА!'], {
@@ -1047,40 +1250,38 @@ export class Canteen {
 		this._add(bread, EAST_MOUNT, 1.9, -5.4, -Math.PI / 2);
 	}
 
-	/** Столы для грязной посуды напротив раздачи: подносы с пустыми тарелками и стаканами, табличка. */
+	/** Стол для грязной посуды напротив раздачи: подносы с пустыми тарелками и стаканами, табличка. */
 	private _buildReturnTables(): void {
-		RETURN_X.forEach((x, t) => {
-			this._add(createSteelTable(RETURN_LENGTH, 0.6), x, 0, RETURN_Z);
-			for (let dx = -RETURN_LENGTH / 2 + 0.3; dx <= RETURN_LENGTH / 2 - 0.3 + 0.01; dx += 0.5) this.colliders.add(x + dx, RETURN_Z, 0.35);
-			const trays = t === 0 ? 3 : 2;
-			for (let i = 0; i < trays; i++) {
-				const tray = createDirtyTray(t * 10 + i, i % 2 ? '#a89f8c' : '#6b4a33');
-				this._add(tray, x - 0.8 + i * 0.55, 0.86, RETURN_Z + (i % 2) * 0.05, (i - 1) * 0.1);
-				// Иногда подносы ставят один на другой.
-				if (i === 0) this._add(createDirtyTray(t * 10 + 5), x - 0.8, 0.86 + 0.06, RETURN_Z + 0.02, 0.15);
-			}
-			const sign = createPoster(
-				createTextTexture(['ДЛЯ ГРЯЗНОЙ', 'ПОСУДЫ'], {
-					width: 56,
-					height: 22,
-					background: '#f2efe6',
-					color: '#2a2a2a',
-					font: 'bold 8px sans-serif',
-					lineHeight: 9,
-					top: 6,
-				}),
-				0.22
-			);
-			// Табличка на стойке у дальнего края стола, лицом к залу.
-			const stand = new THREE.Group();
-			const post = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.3, 0.02), new THREE.MeshStandardMaterial({ color: '#c3c7c9', metalness: 0.6, roughness: 0.35 }));
-			post.position.y = 0.15;
-			stand.add(post);
-			sign.position.set(0, 0.36, 0.012);
-			stand.add(sign);
-			this._add(stand, x + 0.9 * (t === 0 ? 1 : -1), 0.86, RETURN_Z - 0.2);
-		});
+		const x = RETURN_X;
+		this._add(createSteelTable(RETURN_LENGTH, 0.6), x, 0, RETURN_Z);
+		for (let dx = -RETURN_LENGTH / 2 + 0.3; dx <= RETURN_LENGTH / 2 - 0.3 + 0.01; dx += 0.5) this.colliders.add(x + dx, RETURN_Z, 0.35);
+		for (let i = 0; i < 3; i++) {
+			const tray = createDirtyTray(i, i % 2 ? '#a89f8c' : '#6b4a33');
+			this._add(tray, x - 0.8 + i * 0.55, 0.86, RETURN_Z + (i % 2) * 0.05, (i - 1) * 0.1);
+			// Иногда подносы ставят один на другой.
+			if (i === 0) this._add(createDirtyTray(5), x - 0.8, 0.86 + 0.06, RETURN_Z + 0.02, 0.15);
+		}
+		const sign = createPoster(
+			createTextTexture(['ДЛЯ ГРЯЗНОЙ', 'ПОСУДЫ'], {
+				width: 56,
+				height: 22,
+				background: '#f2efe6',
+				color: '#2a2a2a',
+				font: 'bold 8px sans-serif',
+				lineHeight: 9,
+				top: 6,
+			}),
+			0.22
+		);
+		// Табличка на стойке у края стола со стороны прохода, лицом к залу.
+		const stand = new THREE.Group();
+		const post = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.3, 0.02), new THREE.MeshStandardMaterial({ color: '#c3c7c9', metalness: 0.6, roughness: 0.35 }));
+		post.position.y = 0.15;
+		stand.add(post);
+		sign.position.set(0, 0.36, 0.012);
+		stand.add(sign);
+		this._add(stand, x + 0.9, 0.86, RETURN_Z - 0.2);
 		// Глубокие тарелки стопкой — уже собранные.
-		this._add(createPlateStack(6, true), RETURN_X[1] + 0.8, 0.86, RETURN_Z);
+		this._add(createPlateStack(6, true), x + 0.65, 0.86, RETURN_Z + 0.1);
 	}
 }

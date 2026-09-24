@@ -539,6 +539,32 @@ export function createDirtyTray(seed: number, color = '#6b4a33'): THREE.Group {
 	return tray;
 }
 
+/**
+ * Разбитая глубокая тарелка на полу: черепки разного размера (пара — с зелёной каймой) разлетелись от места удара,
+ * посередине — лужица остатков солянки. Начало координат — на полу в точке удара.
+ */
+export function createBowlShards(seed = 4242): THREE.Group {
+	const group = new THREE.Group();
+	const rand = makeRand(seed);
+	const puddle = new THREE.Mesh(new THREE.CircleGeometry(0.1, 12), mat(SOUP_COLOR.solyanka, 0.2));
+	puddle.rotation.x = -Math.PI / 2;
+	puddle.position.y = 0.002;
+	puddle.scale.set(1.5, 0.9, 1);
+	group.add(puddle);
+	const rim = mat('#4f8a64', 0.5);
+	for (let i = 0; i < 16; i++) {
+		const angle = rand() * Math.PI * 2;
+		const r = 0.04 + Math.pow(rand(), 0.7) * 0.45;
+		// Крупные черепки — у места удара, мелкие отлетают дальше.
+		const size = 0.02 + rand() * 0.05 * (1 - r);
+		const shard = box(group, size, 0.008, size * (0.5 + rand() * 0.6), i % 4 === 0 ? rim : PORCELAIN, Math.cos(angle) * r, 0.004, Math.sin(angle) * r);
+		shard.rotation.set((rand() - 0.5) * 0.4, rand() * Math.PI, (rand() - 0.5) * 0.4);
+	}
+	// Донышко уцелело — низкое кольцо.
+	cylinder(group, 0.05, 0.045, 0.02, PORCELAIN, 0.03, 0.01, -0.02, 10);
+	return group;
+}
+
 // ─── Раздача ──────────────────────────────────────────────────────────────────────────────────────────────
 
 export const COUNTER_HEIGHT = 0.88;

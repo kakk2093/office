@@ -11,6 +11,7 @@ import { Footsteps } from '../audio/Footsteps.js';
 import { Sfx } from '../audio/Sfx.js';
 import { Music } from '../audio/Music.js';
 import { RainSound } from '../audio/RainSound.js';
+import { DreadAmbient } from '../audio/DreadAmbient.js';
 import type { Interaction, InteractionSound, Voice } from './Interaction.js';
 import { DialogueBox } from '../ui/DialogueBox.js';
 import { ObjectiveHud } from '../ui/ObjectiveHud.js';
@@ -30,7 +31,7 @@ const FLASH_COLOR = '#5c0b14';
 /** Высота «голоса» при печати реплик, Гц. */
 const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, player: 170 };
 /** За сколько секунд затихает музыка, пока игрок доедает солянку. */
-const MUSIC_FADE_TIME = 10;
+const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
 const DEBUG_START_AT_CANTEEN = true;
 /** Граница уличного плейна, за которую не пускаем камеру. */
@@ -55,6 +56,7 @@ export class Game {
 	private readonly sfx = new Sfx();
 	private readonly music = new Music();
 	private readonly rainSound = new RainSound();
+	private readonly dreadAmbient = new DreadAmbient();
 	private readonly dialogue = new DialogueBox();
 	private readonly objectiveHud = new ObjectiveHud();
 	private readonly targetMarker = new TargetMarker();
@@ -98,10 +100,14 @@ export class Game {
 		this.dialogue.onEnd = (sound) => this._playSound(sound);
 		this.canteen.onSit = (seat) => {
 			this.player.sit(seat.x, seat.z, seat.yaw, seat.eyeY);
-			// Старый клик не должен сразу съесть первую ложку.
-			this.input.consumePress('Mouse0');
 		};
 		this.canteen.onStand = (x, z) => this.player.stand(x, z);
+		// Поднос разбился — с этого момента играет жуткий фон.
+		this.canteen.onTrayCrash = () => {
+			this.sfx.crash();
+			this.dreadAmbient.start();
+		};
+		this.canteen.onDoorSlam = () => this.sfx.scare();
 		this.canteen.onCameraPose = (pose) => this.player.setPose(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
 
 		// Автоплей звука запрещён без жеста пользователя — запускаем звук на первый клик/клавишу.
@@ -145,6 +151,7 @@ export class Game {
 		this._updateStreet(dt);
 
 		this.post.render(this._scene(), this.camera);
+		this.input.endFrame();
 	}
 
 	private _scene(): THREE.Scene {
@@ -171,15 +178,12 @@ export class Game {
 		if (this.dialogue.active) {
 			this.prompt.style.display = 'none';
 			// Реплики листаются левой кнопкой мыши; E во время разговора ничего не делает.
-			this.input.consumePress('KeyE');
 			if (this.input.consumePress('Mouse0')) this.dialogue.advance();
 			return;
 		}
-		// Катсцена: управление заблокировано — подсказок нет, нажатия не копятся.
+		// Катсцена: управление заблокировано — подсказок нет.
 		if (this.place === 'canteen' && this.canteen.cutsceneActive) {
 			this.prompt.style.display = 'none';
-			this.input.consumePress('KeyE');
-			this.input.consumePress('Mouse0');
 			return;
 		}
 		// За столом ЛКМ — ложка солянки; после MUSIC_FADE_BITE-й ложки музыка затихает.
@@ -202,11 +206,7 @@ export class Game {
 		this.prompt.textContent = usable ? `E — ${action.text}` : action.text;
 		this.prompt.style.display = 'block';
 		if (usable && this.input.consumePress('KeyE')) {
-			if (action.dialogue) {
-				// Старый клик, оставшийся в очереди нажатий, не должен сразу пролистать первую реплику.
-				this.input.consumePress('Mouse0');
-				this.dialogue.start(action.dialogue);
-			}
+			if (action.dialogue) this.dialogue.start(action.dialogue);
 			else action.run?.();
 			this._playSound(action.sound);
 		}
@@ -242,15 +242,13 @@ export class Game {
 			// Сначала — предмет в прицеле (подносы, хлеб), потом дверь.
 			const focused = this.canteen.interaction(this.camera);
 			if (focused) return focused;
+			// Из столовой не выйти: сначала — незачем, после катсцены дверь не открывается.
 			const { exitDoor } = this.canteen;
 			if (!near(exitDoor.x, exitDoor.z)) return null;
+			const text = this.canteen.finished ? 'Не поддаётся.' : 'Незачем выходить. Я же ещё не поел соляночку.';
 			return {
 				text: 'выйти на улицу',
-				run: () => {
-					this.canteen.openDoor();
-					this.sfx.door(true);
-					this._beginTransition('street');
-				},
+				dialogue: { lines: [{ speaker: 'Я', text, voice: 'player' }] },
 			};
 		}
 
