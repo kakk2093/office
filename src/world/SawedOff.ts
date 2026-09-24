@@ -17,17 +17,28 @@ const RECEIVER_LENGTH = 0.1;
 /** На сколько переламываются стволы, рад (дулом вниз). */
 const OPEN_ANGLE = 0.75;
 
-/** Перезарядка, с: наклонить → переломить → выкинуть гильзы → вставить патроны по одному → защёлкнуть → вернуть. */
+/** Перезарядка, с: наклонить → переломить → выкинуть гильзы → вставить оба патрона разом → защёлкнуть → вернуть. */
 const OPEN_START = 0.1;
 const OPEN_END = 0.35;
 const EJECT_END = 0.75;
 const INSERT_START = 0.8;
-const INSERT_STAGGER = 0.17;
+/** Оба патрона досылаются разом, одной рукой. */
+const INSERT_STAGGER = 0;
 const INSERT_TIME = 0.25;
 const CLOSE_START = 1.35;
 const CLOSE_END = 1.47;
 const TILT_END = 0.3;
 const RELOAD_TIME = 1.75;
+/** Левая рука при перезарядке: уходит с цевья за патронами, приносит их к патронникам, возвращается на цевьё. */
+const HAND_OFF_START = 0.4;
+const HAND_POCKET = 0.6;
+const HAND_RETURN_START = 1.08;
+const HAND_RETURN_END = 1.33;
+/** Достать / убрать обрез, с. */
+const DRAW_TIME = 0.45;
+const HOLSTER_TIME = 0.35;
+const SKIN = '#d9a98c';
+const SLEEVE = '#2f3640';
 /** Выстрел, с: отдача (резкий толчок и возврат), вспышка на дульном срезе; после отдачи сразу перезарядка. */
 const KICK_UP = 0.03;
 const FIRE_TIME = 0.4;
@@ -36,7 +47,7 @@ const FLASH_TIME = 0.06;
 const FLASH_LIGHT = 6;
 
 /** Звуки обреза — по ним Game играет процедурные эффекты. */
-export type ShotgunSound = 'shot' | 'open' | 'eject' | 'insert' | 'close';
+export type ShotgunSound = 'shot' | 'open' | 'eject' | 'insert' | 'close' | 'draw' | 'holster';
 
 /** 0 до a, 1 после b, между — плавно. */
 function ease(t: number, a: number, b: number): number {
@@ -69,6 +80,11 @@ function createShell(brass: THREE.Material, hull: THREE.Material): THREE.Group {
 export class SawedOff {
 	/** Внешняя группа — её ставят в руки (позиция/поворот в координатах камеры или сцены). */
 	readonly group = new THREE.Group();
+	/** Между внешней и body: убирание/доставание (уводит обрез вниз за край экрана, дулом вниз). */
+	private readonly holster = new THREE.Group();
+	/** 0 — в руках, 1 — убран; куда сейчас движется. */
+	private away = 0;
+	private awayTarget = 0;
 	/** Внутренняя — наклон всего обреза на время перезарядки (казёнником к себе). */
 	private readonly body = new THREE.Group();
 	/** Стволы с цевьём и патронами — поворачиваются вокруг шарнира. */
@@ -76,6 +92,11 @@ export class SawedOff {
 	/** Рычаг запирания сверху колодки — отводится вбок, когда стволы открыты. */
 	private readonly lever = new THREE.Group();
 	private readonly shells: THREE.Group[] = [];
+	/** Левая рука — на стволах (держит цевьё, ходит вместе с ними при переломе); правая — на рукояти. */
+	private readonly leftHand = new THREE.Group();
+	/** Где левая рука держит цевьё и куда уходит за патронами (в координатах стволов, ниже экрана). */
+	private readonly leftHandGrip = new THREE.Vector3(0, -0.022, -0.15);
+	private readonly leftHandPocket = new THREE.Vector3(-0.16, -0.36, 0.04);
 	/** Время с начала перезарядки, с; null — не идёт. */
 	private reloadT: number | null = null;
 	/** Время с выстрела, с; null — отдачи нет. */
@@ -94,7 +115,8 @@ export class SawedOff {
 		const brass = new THREE.MeshStandardMaterial({ color: '#c09a45', metalness: 0.7, roughness: 0.35 });
 		const hull = new THREE.MeshStandardMaterial({ color: '#9c2a22', roughness: 0.6 });
 
-		this.group.add(this.body);
+		this.group.add(this.holster);
+		this.holster.add(this.body);
 		this.body.add(this.barrels);
 		this._buildBarrels(steel, wood, bore);
 		this._buildReceiver(steel, receiverSteel, wood);
@@ -109,12 +131,32 @@ export class SawedOff {
 		this.group.traverse((o) => {
 			if (o instanceof THREE.Mesh) o.castShadow = o.receiveShadow = true;
 		});
+		this._buildHands();
 		this._buildFlashes();
 	}
 
-	/** Идёт выстрел или перезарядка — стрелять/перезаряжать заново нельзя. */
+	/** Идёт выстрел, перезарядка, доставание или убирание — стрелять/перезаряжать нельзя. */
 	get busy(): boolean {
-		return this.reloadT !== null || this.fireT !== null;
+		return this.reloadT !== null || this.fireT !== null || this.away !== this.awayTarget;
+	}
+
+	/** Убран или его сейчас убирают/достают — перекрестия нет. */
+	get holstered(): boolean {
+		return this.away !== 0 || this.awayTarget !== 0;
+	}
+
+	/** Обрез в руках и готов (не убран и не в движении доставания/убирания). */
+	get ready(): boolean {
+		return this.away === 0 && this.awayTarget === 0;
+	}
+
+	/** Убрать, если в руках, или достать, если убран. Во время выстрела и перезарядки — нельзя; false — не вышло. */
+	toggleHolster(): boolean {
+		if (this.reloadT !== null || this.fireT !== null || this.away !== this.awayTarget) return false;
+		this.awayTarget = this.awayTarget === 0 ? 1 : 0;
+		if (this.awayTarget === 0) this.group.visible = true;
+		this.onSound?.(this.awayTarget === 0 ? 'draw' : 'holster');
+		return true;
 	}
 
 	/** Дульный срез (между стволами) в мировых координатах — откуда вылетает дробь. */
@@ -125,7 +167,7 @@ export class SawedOff {
 
 	/** Дуплет: оба ствола разом, после отдачи — сразу перезарядка. false — сейчас нельзя. */
 	fire(): boolean {
-		if (this.busy) return false;
+		if (this.busy || !this.ready) return false;
 		this.fireT = 0;
 		for (const flash of this.flashes) {
 			flash.visible = true;
@@ -138,12 +180,19 @@ export class SawedOff {
 
 	/** Начать перезарядку; false — уже идёт. */
 	reload(): boolean {
-		if (this.reloadT !== null) return false;
+		if (this.reloadT !== null || this.away !== 0) return false;
 		this.reloadT = 0;
 		return true;
 	}
 
 	update(dt: number): void {
+		if (this.away !== this.awayTarget) {
+			const time = this.awayTarget === 1 ? HOLSTER_TIME : DRAW_TIME;
+			this.away = this.awayTarget === 1 ? Math.min(1, this.away + dt / time) : Math.max(0, this.away - dt / time);
+			this._holsterPose();
+			// Убран — не рисуем вовсе.
+			if (this.away === 1) this.group.visible = false;
+		}
 		if (this.fireT !== null) {
 			this.fireT += dt;
 			this._firePose(this.fireT);
@@ -164,6 +213,15 @@ export class SawedOff {
 			return;
 		}
 		this._pose(this.reloadT);
+	}
+
+	/** Убирание: обрез уходит вниз-вправо за край экрана, заваливаясь дулом вниз и набок; доставание — обратно
+	 * (сглажено, в конце — лёгкий «доворот» вверх, как будто вскинули). */
+	private _holsterPose(): void {
+		const k = ease(this.away, 0, 1);
+		const flick = this.awayTarget === 0 ? Math.sin(this.away * Math.PI) * 0.12 : 0;
+		this.holster.position.set(0.06 * k, -0.38 * k, 0.12 * k);
+		this.holster.rotation.set(-0.9 * k + flick, 0.25 * k, -0.5 * k);
 	}
 
 	/** Отдача: обрез резко уходит назад и дулом вверх, потом плавно возвращается; вспышка — первые мгновения. */
@@ -241,7 +299,9 @@ export class SawedOff {
 			}
 			const insertStart = INSERT_START + i * INSERT_STAGGER;
 			if (t >= EJECT_END && t < insertStart) {
-				shell.visible = false;
+				// Стоит там, откуда начнётся досыл (по патронам ведётся левая рука).
+				shell.visible = t >= INSERT_START;
+				shell.position.set(home.x, home.y + 0.04, home.z + 0.12);
 				return;
 			}
 			if (t >= insertStart && t < insertStart + INSERT_TIME) {
@@ -253,6 +313,77 @@ export class SawedOff {
 			}
 			shell.position.set(home.x, home.y, home.z);
 		});
+		this._poseLeftHand(t);
+	}
+
+	/** Левая рука по ходу перезарядки: цевьё → вниз за патронами → с патронами к патронникам (ведёт их) → цевьё. */
+	private _poseLeftHand(t: number): void {
+		const hand = this.leftHand;
+		// Держит патроны сверху-сзади и левее: ладонь над донцами. Пока патроны не в руке (до INSERT_START) —
+		// идём к точке, откуда начнётся досыл, а не к живым позициям патронов (там ещё летят старые гильзы).
+		const shells =
+			t < INSERT_START
+				? new THREE.Vector3(0, BARREL_Y + 0.04, 0.12)
+				: this.shells[0].position.clone().add(this.shells[1].position).multiplyScalar(0.5);
+		const atShells = shells.add(new THREE.Vector3(-0.05, 0.035, 0.045));
+		if (t < HAND_OFF_START || t >= HAND_RETURN_END) hand.position.copy(this.leftHandGrip);
+		else if (t < HAND_POCKET) hand.position.lerpVectors(this.leftHandGrip, this.leftHandPocket, ease(t, HAND_OFF_START, HAND_POCKET));
+		else if (t < INSERT_START) hand.position.lerpVectors(this.leftHandPocket, atShells, ease(t, HAND_POCKET, INSERT_START));
+		else if (t < HAND_RETURN_START) hand.position.copy(atShells);
+		else hand.position.lerpVectors(atShells, this.leftHandGrip, ease(t, HAND_RETURN_START, HAND_RETURN_END));
+		// С патронами кисть чуть наклонена к патронникам (сильнее не крутим — предплечье уйдёт в кадр).
+		const holding = t >= HAND_POCKET && t < HAND_RETURN_END ? ease(t, HAND_POCKET, INSERT_START) * (1 - ease(t, HAND_RETURN_START, HAND_RETURN_END)) : 0;
+		hand.rotation.set(0.4 * holding, 0, 0);
+	}
+
+	/**
+	 * Руки героя — низкополи, из коробок: кисть (ладонь, пальцы, большой палец) и предплечье в рукаве пиджака,
+	 * уходящее за край экрана. Правая обхватывает рукоять, указательный — у спуска; левая снизу держит цевьё.
+	 */
+	private _buildHands(): void {
+		const skin = new THREE.MeshStandardMaterial({ color: SKIN, roughness: 0.75 });
+		const sleeve = new THREE.MeshStandardMaterial({ color: SLEEVE, roughness: 0.85 });
+		/** Предплечье от запястья wrist в сторону dir: кожа у запястья, дальше рукав с манжетой. */
+		const forearm = (parent: THREE.Object3D, wrist: THREE.Vector3, dir: THREE.Vector3) => {
+			dir.normalize();
+			const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+			for (const [w, from, to, m] of [
+				[0.05, 0, 0.06, skin],
+				[0.072, 0.05, 0.34, sleeve],
+			] as const) {
+				const part = new THREE.Mesh(new THREE.BoxGeometry(w, w * 0.9, to - from), m);
+				part.quaternion.copy(q);
+				part.position.copy(wrist).addScaledVector(dir, (from + to) / 2);
+				parent.add(part);
+			}
+		};
+		const part = (parent: THREE.Object3D, w: number, h: number, d: number, x: number, y: number, z: number) => {
+			const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), skin);
+			mesh.position.set(x, y, z);
+			parent.add(mesh);
+			return mesh;
+		};
+
+		// Правая: в системе рукояти (наклонена, как она); ладонь справа, пальцы обхватывают спереди и слева.
+		const right = new THREE.Group();
+		right.position.set(0, -0.035, RECEIVER_LENGTH + 0.085);
+		right.rotation.x = -0.35;
+		this.body.add(right);
+		part(right, 0.022, 0.095, 0.07, 0.031, 0.005, 0.005);
+		part(right, 0.05, 0.08, 0.022, 0.006, -0.005, -0.036);
+		part(right, 0.016, 0.075, 0.045, -0.028, -0.005, -0.018);
+		// Указательный — вытянут вперёд вдоль скобы, к спусковому крючку.
+		part(right, 0.016, 0.016, 0.05, 0.004, 0.05, -0.06);
+		part(right, 0.018, 0.018, 0.055, -0.022, 0.06, -0.005).rotation.y = 0.3;
+		forearm(this.body, new THREE.Vector3(0.03, -0.02, RECEIVER_LENGTH + 0.12), new THREE.Vector3(0.3, -0.45, 1));
+
+		// Левая: ладонь под цевьём, пальцы охватывают справа, большой палец — слева.
+		this.leftHand.position.copy(this.leftHandGrip);
+		this.barrels.add(this.leftHand);
+		part(this.leftHand, 0.07, 0.02, 0.09, 0, 0, 0);
+		part(this.leftHand, 0.02, 0.05, 0.085, 0.047, 0.02, 0);
+		part(this.leftHand, 0.018, 0.03, 0.06, -0.045, 0.016, 0.012);
+		forearm(this.leftHand, new THREE.Vector3(-0.01, -0.012, 0.045), new THREE.Vector3(-0.35, -0.55, 1));
 	}
 
 	/** Два ствола с планкой и мушкой, подствольный крюк, цевьё; чернота каналов на дульном срезе и в патронниках. */

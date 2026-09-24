@@ -437,12 +437,22 @@ export class Cashier {
 	}
 }
 
-/** Сколько попаданий (выстрелов) нужно, чтобы зомби упал. */
-const ZOMBIE_HEALTH = 2;
-const ZOMBIE_FALL_TIME = 0.7;
+/** Сколько попаданий (выстрелов) нужно, чтобы зомби разорвало. */
+const ZOMBIE_HEALTH = 1;
 const ZOMBIE_FLINCH_TIME = 0.3;
-const BLOOD_LIFE = 0.6;
-const BLOOD_GRAVITY = 9.8;
+const BLOOD_LIFE = 1.2;
+const GRAVITY = 9.8;
+/** Брызг крови от попадания и от разрыва тела. */
+const HIT_BLOOD = 14;
+const BURST_BLOOD = 90;
+/** Больше пятен крови на полу от одного зомби не заводим. */
+const MAX_SPLATS = 160;
+/** Лужа под останками растёт до такого радиуса за столько секунд. */
+const POOL_RADIUS = 0.95;
+const POOL_TIME = 4;
+/** Стоны: пауза между ними, с (случайно в пределах). */
+const GROAN_MIN = 3;
+const GROAN_MAX = 7;
 
 interface BloodDrop {
 	mesh: THREE.Mesh;
@@ -450,10 +460,29 @@ interface BloodDrop {
 	life: number;
 }
 
+/** Кусок разорванного тела: летит, кувыркается, отскакивает от пола и в итоге лежит. */
+interface Gib {
+	object: THREE.Object3D;
+	velocity: THREE.Vector3;
+	spin: THREE.Vector3;
+	/** Уже шлёпнулся об пол (оставил пятно). */
+	landed: boolean;
+	resting: boolean;
+}
+
+/** Прямоугольник, внутри которого куски отскакивают от стен (по X/Z), — чтобы не улетали сквозь стены. */
+export interface GibBounds {
+	minX: number;
+	maxX: number;
+	minZ: number;
+	maxZ: number;
+}
+
 /**
  * Враг: та же раздатчица, но мёртвая и потрёпанная — серо-зелёная кожа, грязный халат в пятнах крови и дырах,
  * колпак набок, мутные светящиеся глаза в тёмных глазницах, открытый окровавленный рот. Стоит, вытянув руки вперёд,
- * покачивается, голова свёрнута набок. Попадания: выстрел (hit) — брызги крови и вздрагивание; набрав урон — падает навзничь.
+ * покачивается, голова свёрнута набок. Попадание (hit) — фонтан крови; набрав урон, тело разрывает на части:
+ * голова, руки по суставам, торс, подол, ноги и ошмётки разлетаются от выстрела, падают и остаются лежать в лужах крови.
  */
 export class Zombie {
 	private readonly figure = new Figure({
@@ -466,15 +495,36 @@ export class Zombie {
 		capTilt: 0.35,
 	});
 	readonly group = this.figure.group;
+	/** Где куски отскакивают от стен; null — не ограничиваем. */
+	bounds: GibBounds | null = null;
 	private time = Math.random() * 10;
 	private health = ZOMBIE_HEALTH;
-	/** Время с начала падения, с; null — стоит. */
-	private fallT: number | null = null;
+	private exploded = false;
 	/** 1 — только что попали, к 0 — отошёл. */
 	private flinch = 0;
 	private readonly blood: BloodDrop[] = [];
+	private readonly gibs: Gib[] = [];
+	private splats = 0;
+	private pool: THREE.Mesh | null = null;
+	private poolT = 0;
 	private readonly bloodMaterial = mat('#5a0c0c', 0.4);
 	private readonly bloodGeometry = new THREE.BoxGeometry(0.025, 0.025, 0.025);
+	/** Пятна на полу: плоские круги, чуть над полом и со смещением глубины — не мерцают. */
+	private readonly splatMaterial = new THREE.MeshStandardMaterial({
+		color: '#4a0707',
+		roughness: 0.25,
+		polygonOffset: true,
+		polygonOffsetFactor: -2,
+		polygonOffsetUnits: -2,
+	});
+	private readonly splatGeometry = new THREE.CircleGeometry(1, 9);
+	private readonly box3 = new THREE.Box3();
+	/** Сколько ещё до следующего стона, с. */
+	private groanTimer = 1 + Math.random() * 2;
+	/** Пора стонать — Game играет звук с громкостью и панорамой по расстоянию до игрока. */
+	onGroan: (() => void) | null = null;
+	/** 1 — только что застонал: голова запрокидывается, к 0 — вернулась. */
+	private groan = 0;
 
 	constructor() {
 		this._buildFace();
@@ -482,42 +532,46 @@ export class Zombie {
 	}
 
 	get alive(): boolean {
-		return this.fallT === null;
+		return !this.exploded;
 	}
 
-	/** Объект — часть этого зомби (для попаданий лучом). */
+	/** Объект — часть этого зомби или его разлетевшихся останков (для попаданий лучом). */
 	owns(object: THREE.Object3D): boolean {
-		for (let o: THREE.Object3D | null = object; o; o = o.parent) if (o === this.group) return true;
+		for (let o: THREE.Object3D | null = object; o; o = o.parent) {
+			if (o === this.group || this.gibs.some((gib) => gib.object === o)) return true;
+		}
 		return false;
 	}
 
-	/** Попал выстрел: point — куда (в мире), direction — куда летел. Брызги крови; урон, на нуле — падает. */
+	/** Попал выстрел: point — куда (в мире), direction — куда летел. Брызги крови; урон, на нуле — разрывает. */
 	hit(point: THREE.Vector3, direction: THREE.Vector3): void {
 		if (!this.alive) return;
-		this._splash(point, direction);
+		this._splash(point, direction, HIT_BLOOD, 1);
 		this.flinch = 1;
 		this.health--;
-		if (this.health <= 0) this.fallT = 0;
+		if (this.health <= 0) this._explode(point, direction);
 	}
 
 	update(dt: number): void {
 		this.time += dt;
 		this._updateBlood(dt);
+		this._updateGibs(dt);
+		if (this.pool && this.poolT < POOL_TIME) {
+			this.poolT += dt;
+			const k = Math.min(1, this.poolT / POOL_TIME);
+			this.pool.scale.setScalar(0.15 + (POOL_RADIUS - 0.15) * (1 - (1 - k) ** 2));
+		}
+		if (this.exploded) return;
+
 		const { armL, armR, head, body } = this.figure;
 		this.flinch = Math.max(0, this.flinch - dt / ZOMBIE_FLINCH_TIME);
-
-		if (this.fallT !== null) {
-			// Падает навзничь вокруг ступней: сначала медленно, потом всё быстрее; в конце — лёгкий отскок от пола.
-			this.fallT = Math.min(ZOMBIE_FALL_TIME + 0.25, this.fallT + dt);
-			const k = Math.min(1, this.fallT / ZOMBIE_FALL_TIME);
-			const bounce = this.fallT > ZOMBIE_FALL_TIME ? Math.sin(((this.fallT - ZOMBIE_FALL_TIME) / 0.25) * Math.PI) * 0.06 : 0;
-			this.group.rotation.x = -(Math.PI / 2 - 0.05) * k * k + bounce;
-			this.group.position.y = 0.12 * k;
-			// Руки обмякли — падают вдоль тела.
-			for (const arm of [armL, armR]) arm.shoulder.rotation.x = THREE.MathUtils.lerp(-1.45, -0.2, k);
-			return;
+		this.groan = Math.max(0, this.groan - dt / 1.5);
+		this.groanTimer -= dt;
+		if (this.groanTimer <= 0) {
+			this.groanTimer = GROAN_MIN + Math.random() * (GROAN_MAX - GROAN_MIN);
+			this.groan = 1;
+			this.onGroan?.();
 		}
-
 		// Руки вытянуты вперёд, как у зомби, кисти свисают; каждая чуть покачивается сама по себе.
 		const sway = Math.sin(this.time * 0.9);
 		armR.shoulder.rotation.set(-1.45 + Math.sin(this.time * 1.3) * 0.06, 0, 0.08);
@@ -530,7 +584,111 @@ export class Zombie {
 		body.rotation.set(0.12 - this.flinch * 0.3, 0, sway * 0.05);
 		// Голова свёрнута набок и свешена; изредка дёргается.
 		const twitch = Math.sin(this.time * 7) > 0.97 ? Math.sin(this.time * 40) * 0.08 : 0;
-		head.rotation.set(0.2 - this.flinch * 0.4, 0.1, 0.4 + twitch);
+		// Стонет — голова запрокидывается назад.
+		const groanLift = Math.sin(this.groan * Math.PI) * 0.35;
+		head.rotation.set(0.2 - this.flinch * 0.4 - groanLift, 0.1, 0.4 + twitch);
+	}
+
+	/**
+	 * Разрыв: тело разбирается на куски — они переносятся в сцену с тем же положением в мире и летят от выстрела
+	 * вверх и в стороны. Плюс ошмётки, фонтан крови из торса и лужа, растущая под останками.
+	 */
+	private _explode(point: THREE.Vector3, direction: THREE.Vector3): void {
+		this.exploded = true;
+		const scene = this.group.parent;
+		if (!scene) return;
+		this.group.updateWorldMatrix(true, true);
+		const { head, armL, armR, body } = this.figure;
+
+		// Низ халата (подол, фартук ниже пояса, лоскуты) — отдельным куском от торса.
+		const lower = new THREE.Group();
+		body.add(lower);
+		for (const child of [...body.children]) {
+			if (child instanceof THREE.Mesh && child.position.y < STANDING_TORSO_Y) lower.attach(child);
+		}
+		// Сначала дальние звенья (кисть с предплечьем от плеча, голова, плечи от торса), потом сам торс и ноги.
+		const pieces: THREE.Object3D[] = [armR.elbow, armL.elbow, armR.shoulder, armL.shoulder, head, lower, body];
+		for (const child of this.group.children) if (child instanceof THREE.Mesh) pieces.push(child);
+		const center = new THREE.Vector3();
+		this.group.localToWorld(center.set(0, STANDING_TORSO_Y + 0.2, 0));
+		const push = direction.clone().setY(0).normalize();
+		for (const piece of pieces) {
+			scene.attach(piece);
+			const from = piece.getWorldPosition(new THREE.Vector3());
+			// Разлетаются от центра и по ходу выстрела; голову и руки — сильнее и выше.
+			const light = piece === head || piece === armR.elbow || piece === armL.elbow;
+			const velocity = from
+				.clone()
+				.sub(center)
+				.setY(0)
+				.multiplyScalar(4)
+				.addScaledVector(push, 2 + Math.random() * 2.5)
+				.add(new THREE.Vector3((Math.random() - 0.5) * 2.5, (light ? 3 : 1.5) + Math.random() * 2, (Math.random() - 0.5) * 2.5));
+			const spin = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(light ? 16 : 7);
+			this.gibs.push({ object: piece, velocity, spin, landed: false, resting: false });
+		}
+		// Ошмётки — куски мяса, кожи и ткани.
+		const colors = ['#6b1010', '#8a2a22', '#4a0a0a', '#97a386', '#b8b29c', '#7a1a16'];
+		for (let i = 0; i < 12; i++) {
+			const size = 0.035 + Math.random() * 0.06;
+			const chunk = new THREE.Mesh(
+				new THREE.BoxGeometry(size, size * (0.5 + Math.random() * 0.7), size * (0.6 + Math.random() * 0.8)),
+				mat(colors[i % colors.length], 0.5)
+			);
+			chunk.castShadow = true;
+			chunk.position.copy(center).add(new THREE.Vector3((Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.3));
+			scene.add(chunk);
+			const velocity = push
+				.clone()
+				.multiplyScalar(2 + Math.random() * 3)
+				.add(new THREE.Vector3((Math.random() - 0.5) * 5, 1.5 + Math.random() * 3.5, (Math.random() - 0.5) * 5));
+			const spin = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(20);
+			this.gibs.push({ object: chunk, velocity, spin, landed: false, resting: false });
+		}
+
+		this._splash(point, direction, BURST_BLOOD / 3, 1.5);
+		this._splash(center, push, BURST_BLOOD, 2.2);
+		// Лужа под останками: растёт, пока кровь стекает.
+		this.pool = this._splat(this.group.position.x, this.group.position.z, 1);
+		this.pool.scale.setScalar(0.15);
+	}
+
+	/** Полёт кусков: гравитация, кувырок, отскок от пола (по нижней точке куска) и от стен, трение — и замирают. */
+	private _updateGibs(dt: number): void {
+		for (const gib of this.gibs) {
+			if (gib.resting) continue;
+			const { object, velocity, spin } = gib;
+			velocity.y -= GRAVITY * dt;
+			object.position.addScaledVector(velocity, dt);
+			object.rotation.x += spin.x * dt;
+			object.rotation.y += spin.y * dt;
+			object.rotation.z += spin.z * dt;
+			if (this.bounds) {
+				const { minX, maxX, minZ, maxZ } = this.bounds;
+				if (object.position.x < minX || object.position.x > maxX) {
+					object.position.x = THREE.MathUtils.clamp(object.position.x, minX, maxX);
+					velocity.x *= -0.3;
+				}
+				if (object.position.z < minZ || object.position.z > maxZ) {
+					object.position.z = THREE.MathUtils.clamp(object.position.z, minZ, maxZ);
+					velocity.z *= -0.3;
+				}
+			}
+			const bottom = this.box3.setFromObject(object).min.y;
+			if (bottom < 0) {
+				object.position.y -= bottom;
+				if (!gib.landed && velocity.y < -1.5) {
+					// Шлёпнулся — пятно крови под ним.
+					gib.landed = true;
+					this._splat(object.position.x, object.position.z, 0.12 + Math.random() * 0.15);
+				}
+				if (velocity.y < 0) velocity.y *= -0.25;
+				velocity.x *= 0.6;
+				velocity.z *= 0.6;
+				spin.multiplyScalar(0.55);
+				if (velocity.lengthSq() < 0.04) gib.resting = true;
+			}
+		}
 	}
 
 	/** Мёртвое лицо поверх головы Figure: глазницы, мутные глаза, открытый рот с зубами, кровь на подбородке, рана. */
@@ -601,19 +759,19 @@ export class Zombie {
 		box(this.group, 0.04, 0.05, 0.01, skin, 0.11, 0.22, 0.054);
 	}
 
-	/** Брызги крови из точки попадания — назад к стрелку и в стороны, падают под гравитацией. */
-	private _splash(point: THREE.Vector3, direction: THREE.Vector3): void {
+	/** Брызги крови из точки: count капель назад по выстрелу, вверх и в стороны, с силой power; падая на пол — пятна. */
+	private _splash(point: THREE.Vector3, direction: THREE.Vector3, count: number, power: number): void {
 		const parent = this.group.parent;
 		if (!parent) return;
-		for (let i = 0; i < 10; i++) {
+		for (let i = 0; i < count; i++) {
 			const mesh = new THREE.Mesh(this.bloodGeometry, this.bloodMaterial);
 			mesh.position.copy(point);
-			mesh.scale.setScalar(0.6 + Math.random() * 0.8);
+			mesh.scale.setScalar(0.6 + Math.random() * 1.4);
 			parent.add(mesh);
 			const velocity = direction
 				.clone()
-				.multiplyScalar(-0.8 - Math.random())
-				.add(new THREE.Vector3(Math.random() - 0.5, Math.random() * 1.2, Math.random() - 0.5).multiplyScalar(1.5));
+				.multiplyScalar((Math.random() - 0.35) * 2 * power)
+				.add(new THREE.Vector3(Math.random() - 0.5, Math.random() * 1.2, Math.random() - 0.5).multiplyScalar(1.8 * power));
 			this.blood.push({ mesh, velocity, life: BLOOD_LIFE * (0.6 + Math.random() * 0.6) });
 		}
 	}
@@ -622,12 +780,28 @@ export class Zombie {
 		for (let i = this.blood.length - 1; i >= 0; i--) {
 			const drop = this.blood[i];
 			drop.life -= dt;
-			drop.velocity.y -= BLOOD_GRAVITY * dt;
+			drop.velocity.y -= GRAVITY * dt;
 			drop.mesh.position.addScaledVector(drop.velocity, dt);
-			if (drop.life <= 0 || drop.mesh.position.y < 0.01) {
+			const landed = drop.mesh.position.y < 0.01;
+			if (landed || drop.life <= 0) {
+				if (landed && Math.random() < 0.6) this._splat(drop.mesh.position.x, drop.mesh.position.z, 0.02 + Math.random() * 0.07);
 				drop.mesh.removeFromParent();
 				this.blood.splice(i, 1);
 			}
 		}
+	}
+
+	/** Пятно крови на полу радиуса radius; сверх MAX_SPLATS — не заводим (лужу — всегда). */
+	private _splat(x: number, z: number, radius: number): THREE.Mesh {
+		const splat = new THREE.Mesh(this.splatGeometry, this.splatMaterial);
+		splat.rotation.set(-Math.PI / 2, 0, Math.random() * Math.PI);
+		splat.position.set(x, 0.004 + Math.random() * 0.002, z);
+		splat.scale.set(radius, radius * (0.6 + Math.random() * 0.4), 1);
+		splat.receiveShadow = true;
+		if (this.splats < MAX_SPLATS || radius >= 1) {
+			this.splats++;
+			this.group.parent?.add(splat);
+		}
+		return splat;
 	}
 }

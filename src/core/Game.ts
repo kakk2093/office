@@ -41,7 +41,7 @@ const MUSIC_FADE_TIME = 5;
 const DEBUG_START_AT_CANTEEN = false;
 /** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
 const DEBUG_SKIP_INTRO = true;
-/** Отладка: обрез в руках, ЛКМ — дуплет (после него сама перезарядка), R — перезарядка. */
+/** Отладка: обрез в руках, ЛКМ — дуплет (после него сама перезарядка), R — перезарядка, T — убрать/достать. */
 const DEBUG_SHOTGUN = true;
 /** Обрез в руках — в координатах камеры: справа внизу, дулом чуть к центру экрана. */
 const SHOTGUN_HELD_POSITION = new THREE.Vector3(0.16, -0.17, -0.42);
@@ -51,6 +51,8 @@ const SHOTGUN_BOB = 0.01;
 /** Отладка: зомби-раздатчица в офисе — стоит в свободном углу, лицом к месту старта. */
 const DEBUG_ZOMBIE = true;
 const ZOMBIE_TEST_POSITION = { x: 1.5, z: 2 };
+/** Ближе этого (м) зомби не стонет, а рычит. */
+const ZOMBIE_ANGRY_DISTANCE = 3;
 /** Дуплет: по 9 дробин из ствола (только эффект — попадание считает один луч); разброс — угол конуса, рад; дальше дробь не летит. */
 const PELLETS = 18;
 const PELLET_SPREAD = 0.06;
@@ -121,7 +123,7 @@ export class Game {
 	/** Обрез в руках (пока только для отладки, см. DEBUG_SHOTGUN): висит на камере. */
 	private readonly shotgun: SawedOff | null = null;
 	/** Враги по местам (пока только тестовый зомби в офисе). */
-	private readonly zombies: { place: Place; zombie: Zombie }[] = [];
+	private readonly zombies: { place: Place; zombie: Zombie; collider: ReturnType<CircleColliders['add']> | null }[] = [];
 	private readonly raycaster = new THREE.Raycaster();
 	/** Росчерки дроби, следы на стенах, пыль. */
 	private readonly impacts = new Impacts();
@@ -148,6 +150,8 @@ export class Game {
 				eject: () => this.sfx.shotgunEject(),
 				insert: () => this.sfx.shotgunInsert(),
 				close: () => this.sfx.shotgunClose(),
+				draw: () => this.sfx.shotgunDraw(),
+				holster: () => this.sfx.shotgunHolster(),
 			};
 			this.shotgun.onSound = (sound) => sounds[sound]();
 		}
@@ -158,8 +162,12 @@ export class Game {
 			zombie.group.position.set(x, 0, z);
 			zombie.group.rotation.y = Math.atan2(spawnPoint.x - x, spawnPoint.z - z);
 			this.room.scene.add(zombie.group);
-			this.colliders.add(x, z, 0.35);
-			this.zombies.push({ place: 'office', zombie });
+			// Куски тела отскакивают от стен офиса, а не улетают сквозь них.
+			const { minX, maxX, minZ, maxZ } = this.room.bounds;
+			const margin = 0.25;
+			zombie.bounds = { minX: minX + margin, maxX: maxX - margin, minZ: minZ + margin, maxZ: maxZ - margin };
+			this.zombies.push({ place: 'office', zombie, collider: this.colliders.add(x, z, 0.35) });
+			zombie.onGroan = () => this._zombieGroan(zombie);
 		}
 		if (DEBUG_START_AT_CANTEEN) {
 			this.place = 'street';
@@ -290,7 +298,12 @@ export class Game {
 		const canteenBusy = this.place === 'canteen' && (this.canteen.eating || this.canteen.cutsceneActive);
 		const canUse = !this.dialogue.active && !this.introPending && this.flashTime === null && !canteenBusy;
 		// Перекрестие — когда из обреза можно стрелять (и мышь захвачена: без неё взгляд не наводится).
-		this.crosshair.style.display = canUse && this.input.isPointerLocked ? 'block' : 'none';
+		if (canUse && this.input.consumePress('KeyT')) this.shotgun.toggleHolster();
+		// Перекрестие — только с обрезом в руках (убран или в движении — нет).
+		const crosshairShown = canUse && this.input.isPointerLocked && !this.shotgun.holstered;
+		this.crosshair.style.display = crosshairShown ? 'block' : 'none';
+		// Прицел на живом зомби (и он не за препятствием) — перекрестие красное.
+		this.crosshair.classList.toggle('enemy', crosshairShown && this._aimedZombie(scene) !== null);
 		if (canUse && this.input.consumePress('Mouse0') && this.shotgun.fire()) {
 			this.player.shake();
 			this._shoot(scene);
@@ -301,6 +314,40 @@ export class Game {
 		this.impacts.update(dt);
 	}
 
+	/** Луч из центра экрана до первого видимого меша сцены не дальше far (обрез на камере не в счёт). */
+	private _aimRay(scene: THREE.Scene, far: number): THREE.Intersection | undefined {
+		this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+		this.raycaster.far = far;
+		const targets = scene.children.filter((o) => o !== this.camera);
+		return this.raycaster.intersectObjects(targets, true).find((h) => h.object instanceof THREE.Mesh && isShown(h.object));
+	}
+
+	/** Живой зомби под прицелом (не закрытый препятствием); null — нет. Сначала дешёвая проверка только по зомби —
+	 * всю сцену луч проходит, лишь когда зомби на линии прицела. */
+	private _aimedZombie(scene: THREE.Scene): Zombie | null {
+		const alive = this.zombies.filter(({ place, zombie }) => place === this.place && zombie.alive).map(({ zombie }) => zombie);
+		if (alive.length === 0) return null;
+		this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
+		this.raycaster.far = PELLET_RANGE;
+		const direct = this.raycaster.intersectObjects(alive.map((z) => z.group), true)[0];
+		if (!direct) return null;
+		const hit = this._aimRay(scene, direct.distance + 0.01);
+		return (hit && alive.find((z) => z.owns(hit.object))) ?? null;
+	}
+
+	/** Стон зомби: тише с расстоянием, панорама — с какой стороны он от взгляда; вблизи — злой рык. */
+	private _zombieGroan(zombie: Zombie): void {
+		// До первого клика звук ещё не разрешён — стоны копились бы в приостановленном звуке и потом звучали разом.
+		if (!this.input.isPointerLocked) return;
+		const to = zombie.group.position.clone().sub(this.camera.position).setY(0);
+		const distance = to.length();
+		const volume = 1 / (1 + 0.15 * distance * distance);
+		if (volume < 0.03) return;
+		const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion).setY(0).normalize();
+		const pan = distance > 0.01 ? THREE.MathUtils.clamp(to.normalize().dot(right), -1, 1) * 0.8 : 0;
+		this.sfx.zombieGroan(volume, pan, distance < ZOMBIE_ANGRY_DISTANCE);
+	}
+
 	/**
 	 * Выстрел: попадание решает один луч из центра экрана — до первого видимого меша (сам обрез на камере не в счёт);
 	 * попал в живого зомби — hit. Дробь — только эффект: PELLETS росчерков от дульного среза с разбросом; если луч
@@ -309,19 +356,23 @@ export class Game {
 	private _shoot(scene: THREE.Scene): void {
 		const origin = this.camera.getWorldPosition(new THREE.Vector3());
 		const forward = this.camera.getWorldDirection(new THREE.Vector3());
-		this.raycaster.set(origin, forward);
-		this.raycaster.far = PELLET_RANGE;
-		const targets = scene.children.filter((o) => o !== this.camera);
-		const hit = this.raycaster.intersectObjects(targets, true).find((h) => h.object instanceof THREE.Mesh && isShown(h.object));
+		const hit = this._aimRay(scene, PELLET_RANGE);
+		// По зомби и его останкам следов нет — там кровь (иначе щербинки повисли бы в воздухе вокруг тела).
+		// Проверяем до hit: после разрыва куски уже не внутри group зомби.
+		const onZombie = hit && this.zombies.some(({ zombie }) => zombie.owns(hit.object));
 		const target = hit && this.zombies.find(({ place, zombie }) => place === this.place && zombie.alive && zombie.owns(hit.object));
 		if (hit && target) {
 			target.zombie.hit(hit.point, forward);
-			this.sfx.flesh();
+			if (target.zombie.alive) this.sfx.flesh();
+			else {
+				// Разорвало — сквозь останки можно пройти.
+				this.sfx.gore();
+				if (target.collider) this.colliders.remove(target.collider);
+				target.collider = null;
+			}
 		}
 
-		// Плоскость, на которую ложится дробь: поверхность под лучом, нормалью к стрелку. По зомби следов нет — там кровь.
-		// По лежащему телу — тоже нет: следы повисли бы в воздухе вокруг него.
-		const onZombie = hit && this.zombies.some(({ zombie }) => zombie.owns(hit.object));
+		// Плоскость, на которую ложится дробь: поверхность под лучом, нормалью к стрелку.
 		let plane: THREE.Plane | null = null;
 		if (hit?.face && !onZombie) {
 			const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);

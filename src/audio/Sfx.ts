@@ -525,7 +525,7 @@ export class Sfx {
 
 	/**
 	 * Дуплет из обреза — тяжёлый: два почти слитых выстрела (второй на 12 мс позже). В каждом — короткий треск,
-	 * плотный «хлопок» шума с быстро темнеющим фильтром и низкий удар в грудь (синус с падающим тоном, до ~30 Гц).
+	 * плотный «хлопок» шума с быстро темнеющим фильтром и низкий удар (шумовой низ и короткий синус — не «бочка»).
 	 * Поверх — длинный глухой раскат, как эхо в помещении. Лёгкое насыщение — только на низком ударе (плотнее,
 	 * без хрипа в шуме); всё вместе — через компрессор, чтобы не клиппило.
 	 */
@@ -572,24 +572,34 @@ export class Sfx {
 			const low = ctx.createBiquadFilter();
 			low.type = 'lowpass';
 			low.frequency.setValueAtTime(3000, t);
-			low.frequency.exponentialRampToValueAtTime(250, t + 0.25);
+			low.frequency.exponentialRampToValueAtTime(450, t + 0.25);
 			const blastGain = ctx.createGain();
-			blastGain.gain.setValueAtTime(0.9 * level, t);
+			blastGain.gain.setValueAtTime(1.1 * level, t);
 			blastGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
 			blast.connect(low);
 			low.connect(blastGain);
 			blastGain.connect(comp);
 			blast.start(t);
 
-			// Низкий удар: синус и треугольник с падающим тоном — «вес» выстрела.
-			for (const [type, from, to, gain, decay] of [
-				['sine', 110, 32, 1.4, 0.55],
-				['triangle', 65, 28, 0.6, 0.4],
-			] as const) {
+			// Низкий удар — «вес» выстрела. Короткий и негромкий: длинный тональный синус звучит как бочка.
+			// Основной низ — шумовой (полоса ~160 Гц), без тона.
+			const body = this._noiseBurst(0.3);
+			const bodyBand = ctx.createBiquadFilter();
+			bodyBand.type = 'bandpass';
+			bodyBand.frequency.value = 160;
+			bodyBand.Q.value = 0.8;
+			const bodyGain = ctx.createGain();
+			bodyGain.gain.setValueAtTime(1.6 * level, t);
+			bodyGain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+			body.connect(bodyBand);
+			bodyBand.connect(bodyGain);
+			bodyGain.connect(drive);
+			body.start(t);
+			for (const [type, from, to, gain, decay] of [['sine', 120, 45, 0.55, 0.16]] as const) {
 				const osc = ctx.createOscillator();
 				osc.type = type;
 				osc.frequency.setValueAtTime(from, t);
-				osc.frequency.exponentialRampToValueAtTime(to, t + 0.35);
+				osc.frequency.exponentialRampToValueAtTime(to, t + decay);
 				const g = ctx.createGain();
 				g.gain.setValueAtTime(gain * level, t);
 				g.gain.exponentialRampToValueAtTime(0.001, t + decay);
@@ -634,6 +644,204 @@ export class Sfx {
 		gain.connect(ctx.destination);
 		thud.start(t);
 		this._soft(t + 0.01, 0.1, 1300, 0.12);
+	}
+
+	/**
+	 * Тело разрывает: тяжёлый мокрый шлепок, хлюпающий «чавк» (полоса шума мечется по частоте), хруст костей
+	 * и следом — шлепки падающих на пол кусков.
+	 */
+	gore(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+
+		const splat = this._noiseBurst(0.4);
+		const splatBand = ctx.createBiquadFilter();
+		splatBand.type = 'bandpass';
+		splatBand.Q.value = 1.2;
+		splatBand.frequency.setValueAtTime(500, t);
+		splatBand.frequency.exponentialRampToValueAtTime(140, t + 0.3);
+		const splatGain = ctx.createGain();
+		splatGain.gain.setValueAtTime(1.4, t);
+		splatGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+		splat.connect(splatBand);
+		splatBand.connect(splatGain);
+		splatGain.connect(ctx.destination);
+		splat.start(t);
+
+		// Хлюпанье: частоту полосы быстро дёргает низкочастотный генератор.
+		const squelch = this._noiseBurst(0.35);
+		const wet = ctx.createBiquadFilter();
+		wet.type = 'bandpass';
+		wet.Q.value = 4;
+		wet.frequency.value = 700;
+		const wobble = ctx.createOscillator();
+		wobble.frequency.setValueAtTime(28, t);
+		wobble.frequency.linearRampToValueAtTime(12, t + 0.35);
+		const wobbleDepth = ctx.createGain();
+		wobbleDepth.gain.value = 450;
+		wobble.connect(wobbleDepth);
+		wobbleDepth.connect(wet.frequency);
+		const squelchGain = ctx.createGain();
+		squelchGain.gain.setValueAtTime(0.7, t + 0.02);
+		squelchGain.gain.exponentialRampToValueAtTime(0.001, t + 0.37);
+		squelch.connect(wet);
+		wet.connect(squelchGain);
+		squelchGain.connect(ctx.destination);
+		squelch.start(t + 0.02);
+		wobble.start(t);
+		wobble.stop(t + 0.4);
+
+		// Хруст: россыпь сухих щелчков в первые 0.1 с.
+		for (let i = 0; i < 7; i++) this._clack(t + Math.random() * 0.1, [1400 + Math.random() * 2200], 0.12, 0.03);
+
+		const thump = ctx.createOscillator();
+		thump.frequency.setValueAtTime(90, t);
+		thump.frequency.exponentialRampToValueAtTime(40, t + 0.15);
+		const thumpGain = ctx.createGain();
+		thumpGain.gain.setValueAtTime(0.6, t);
+		thumpGain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+		thump.connect(thumpGain);
+		thumpGain.connect(ctx.destination);
+		thump.start(t);
+		thump.stop(t + 0.2);
+
+		// Куски шлёпаются на пол — всё реже и тише.
+		for (const [delay, level] of [
+			[0.35, 0.35],
+			[0.45, 0.25],
+			[0.58, 0.3],
+			[0.7, 0.18],
+			[0.9, 0.14],
+			[1.15, 0.08],
+		] as const) {
+			const drop = this._noiseBurst(0.07);
+			const low = ctx.createBiquadFilter();
+			low.type = 'lowpass';
+			low.frequency.value = 500 + Math.random() * 400;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(level * 2, t + delay);
+			gain.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.08);
+			drop.connect(low);
+			low.connect(gain);
+			gain.connect(ctx.destination);
+			drop.start(t + delay);
+		}
+	}
+
+	/**
+	 * Стон зомби: хриплый низкий голос — две чуть расстроенные пилы (биения), тон плавает вверх-вниз с дрожью,
+	 * через две полосы-«гласные» (протяжное «ооо»), с хрипом (амплитуда дёргается ~30 Гц) и сиплым выдохом.
+	 * angry — короче, выше и злее («ааа»). volume — по расстоянию, pan — слева/справа (−1..1).
+	 */
+	zombieGroan(volume: number, pan: number, angry: boolean): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+		const duration = angry ? 0.8 + Math.random() * 0.4 : 1.4 + Math.random() * 0.8;
+		const f0 = (angry ? 135 : 82) * (0.9 + Math.random() * 0.2);
+
+		const out = ctx.createGain();
+		out.gain.value = volume * (angry ? 0.5 : 0.4);
+		const panner = ctx.createStereoPanner();
+		panner.pan.value = pan;
+		out.connect(panner);
+		panner.connect(ctx.destination);
+
+		// Огибающая с хрипом: основная громкость × дрожание.
+		const env = ctx.createGain();
+		env.gain.setValueAtTime(0.0001, t);
+		env.gain.linearRampToValueAtTime(1, t + (angry ? 0.08 : 0.25));
+		env.gain.setValueAtTime(1, t + duration * 0.7);
+		env.gain.linearRampToValueAtTime(0.0001, t + duration);
+		const rasp = ctx.createGain();
+		rasp.gain.value = 0.6;
+		const raspLfo = ctx.createOscillator();
+		raspLfo.frequency.value = 26 + Math.random() * 10;
+		const raspDepth = ctx.createGain();
+		raspDepth.gain.value = angry ? 0.4 : 0.3;
+		raspLfo.connect(raspDepth);
+		raspDepth.connect(rasp.gain);
+		env.connect(rasp);
+		rasp.connect(out);
+
+		// «Гласные»: полосы, которые медленно сдвигаются — «оо-оа».
+		const formants: BiquadFilterNode[] = [];
+		for (const [from, to, q, level] of angry
+			? ([
+					[700, 900, 5, 1],
+					[1200, 1500, 6, 0.6],
+				] as const)
+			: ([
+					[380, 520, 5, 1],
+					[800, 950, 6, 0.5],
+				] as const)) {
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.Q.value = q;
+			band.frequency.setValueAtTime(from, t);
+			band.frequency.linearRampToValueAtTime(to, t + duration * 0.6);
+			band.frequency.linearRampToValueAtTime(from * 0.9, t + duration);
+			const g = ctx.createGain();
+			g.gain.value = level * 2.2;
+			band.connect(g);
+			g.connect(env);
+			formants.push(band);
+		}
+
+		// Голос: тон поднимается и сползает вниз, с дрожью ~6 Гц.
+		const vibrato = ctx.createOscillator();
+		vibrato.frequency.value = 5 + Math.random() * 2;
+		const vibratoDepth = ctx.createGain();
+		vibratoDepth.gain.value = f0 * 0.04;
+		vibrato.connect(vibratoDepth);
+		for (const detune of [1, 1.025]) {
+			const osc = ctx.createOscillator();
+			osc.type = 'sawtooth';
+			osc.frequency.setValueAtTime(f0 * detune * 0.9, t);
+			osc.frequency.linearRampToValueAtTime(f0 * detune * 1.15, t + duration * 0.35);
+			osc.frequency.linearRampToValueAtTime(f0 * detune * 0.75, t + duration);
+			vibratoDepth.connect(osc.frequency);
+			for (const band of formants) osc.connect(band);
+			osc.start(t);
+			osc.stop(t + duration + 0.05);
+		}
+
+		// Сиплый выдох поверх голоса.
+		const breath = this._noiseBurst(duration);
+		const breathBand = ctx.createBiquadFilter();
+		breathBand.type = 'bandpass';
+		breathBand.frequency.value = angry ? 1600 : 1100;
+		breathBand.Q.value = 1;
+		const breathGain = ctx.createGain();
+		breathGain.gain.value = angry ? 0.35 : 0.2;
+		breath.connect(breathBand);
+		breathBand.connect(breathGain);
+		breathGain.connect(env);
+		breath.start(t);
+
+		vibrato.start(t);
+		raspLfo.start(t);
+		vibrato.stop(t + duration + 0.05);
+		raspLfo.stop(t + duration + 0.05);
+	}
+
+	/** Обрез достают: шорох одежды и лязг металла, когда его перехватывают в руках. */
+	shotgunDraw(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._soft(t, 0.25, 1800, 0.08);
+		this._clack(t + 0.3, [900, 2300], 0.2, 0.06);
+	}
+
+	/** Обрез убирают: шорох одежды и глухой стук. */
+	shotgunHolster(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._soft(t, 0.25, 1500, 0.08);
+		this._clack(t + 0.22, [500, 1300], 0.12, 0.05);
 	}
 
 	/** Обрез переламывают: щелчок рычага запирания и металлический лязг стволов на шарнире. */
