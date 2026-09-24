@@ -407,26 +407,87 @@ export function createSandbox(): THREE.Group {
 	return group;
 }
 
-/** Калитка: сплошная крашеная панель (не прутья, как у забора) — чтобы явно выделялась на его фоне.
- * Начало координат группы — на петле (край), не в центре, чтобы вращать группу на месте (как дверь офиса). */
-export function createGate(width: number, height: number, color = '#8b3a2a'): THREE.Group {
-	const group = new THREE.Group();
-	const mat = new THREE.MeshStandardMaterial({ color, side: THREE.DoubleSide });
-	const leaf = new THREE.Mesh(new THREE.PlaneGeometry(width, height), mat);
-	leaf.position.set(width / 2, height / 2, 0);
-	leaf.castShadow = true;
-	group.add(leaf);
+/** Цвет кованого металла — как у прутьев забора. */
+const IRON = '#262827';
 
-	// Тонкая рама потемнее — читается как крашеный металлический лист, а не просто плоскость цвета.
-	const frameMat = new THREE.MeshStandardMaterial({ color: '#3a1f16' });
-	for (const [fx, fy, fw, fh] of [
-		[width / 2, 0.03, width, 0.06],
-		[width / 2, height - 0.03, width, 0.06],
-	] as const) {
-		const rail = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.03), frameMat);
-		rail.position.set(fx, fy, 0.02);
-		group.add(rail);
+/**
+ * Металлическая калитка в стиле забора: рама из профиля, прутья с пиками, средняя перекладина, диагональная
+ * распорка, петли и щеколда с ручкой. Начало координат группы — на петле (край полотна), полотно тянется по +X,
+ * — так группу можно крутить на месте для анимации (как дверь офиса).
+ */
+export function createGate(width: number, height: number): THREE.Group {
+	const group = new THREE.Group();
+	const iron = new THREE.MeshStandardMaterial({ color: IRON, roughness: 0.55, metalness: 0.5 });
+	const bottom = 0.06;
+	const tube = 0.05;
+	const bar = (w: number, h: number, d: number, x: number, y: number, z = 0) => {
+		const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), iron);
+		mesh.position.set(x, y, z);
+		mesh.castShadow = true;
+		group.add(mesh);
+		return mesh;
+	};
+
+	// Рама: стойки и три перекладины.
+	const top = height - 0.12;
+	bar(tube, top - bottom, tube, tube / 2, (bottom + top) / 2);
+	bar(tube, top - bottom, tube, width - tube / 2, (bottom + top) / 2);
+	for (const y of [bottom, top, bottom + (top - bottom) * 0.45]) bar(width, tube, tube, width / 2, y);
+
+	// Прутья с пиками — выше верхней перекладины, как у забора.
+	const step = 0.13;
+	const count = Math.floor((width - tube * 2) / step);
+	const offset = (width - (count - 1) * step) / 2;
+	const tipGeometry = new THREE.ConeGeometry(0.03, 0.08, 4);
+	for (let i = 0; i < count; i++) {
+		const x = offset + i * step;
+		bar(0.022, height - 0.08 - bottom, 0.022, x, (bottom + height - 0.08) / 2);
+		const tip = new THREE.Mesh(tipGeometry, iron);
+		tip.position.set(x, height - 0.04, 0);
+		tip.rotation.y = Math.PI / 4;
+		group.add(tip);
 	}
+
+	// Диагональная распорка — от нижнего угла у петель к средней перекладине у щеколды (не даёт полотну провиснуть).
+	const midY = bottom + (top - bottom) * 0.45;
+	const dx = width - tube * 2;
+	const dy = midY - bottom;
+	const brace = bar(Math.hypot(dx, dy), 0.035, 0.03, width / 2, (bottom + midY) / 2);
+	brace.rotation.z = Math.atan2(dy, dx);
+
+	// Петли — цилиндры на краю у столба.
+	for (const y of [bottom + 0.25, top - 0.25]) {
+		const hinge = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.14, 8), iron);
+		hinge.position.set(0, y, 0);
+		group.add(hinge);
+	}
+
+	// Щеколда и ручка с обеих сторон полотна.
+	const latchY = midY + 0.25;
+	bar(0.16, 0.03, 0.02, width - 0.05, latchY, 0.035);
+	const handleMat = new THREE.MeshStandardMaterial({ color: '#8a8d8f', roughness: 0.3, metalness: 0.8 });
+	for (const side of [1, -1]) {
+		const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.14, 0.03), handleMat);
+		handle.position.set(width - 0.12, latchY - 0.12, side * 0.05);
+		group.add(handle);
+	}
+	return group;
+}
+
+/** Столб калитки: квадратная труба с навершием-шаром. Начало координат — центр основания. */
+export function createGatePost(height: number): THREE.Group {
+	const group = new THREE.Group();
+	const iron = new THREE.MeshStandardMaterial({ color: IRON, roughness: 0.55, metalness: 0.5 });
+	const post = new THREE.Mesh(new THREE.BoxGeometry(0.1, height, 0.1), iron);
+	post.position.y = height / 2;
+	post.castShadow = true;
+	group.add(post);
+	const cap = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.03, 0.14), iron);
+	cap.position.y = height + 0.015;
+	group.add(cap);
+	const ball = new THREE.Mesh(new THREE.IcosahedronGeometry(0.05, 1), iron);
+	ball.position.y = height + 0.08;
+	group.add(ball);
 	return group;
 }
 

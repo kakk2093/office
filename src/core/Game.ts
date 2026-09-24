@@ -149,7 +149,7 @@ export class Game {
 		if (this.input.consumePress('KeyE')) {
 			const opening = !this.street.isGateOpen;
 			this.street.toggleGate();
-			this.sfx.door(opening);
+			this.sfx.gate(opening);
 		}
 	}
 

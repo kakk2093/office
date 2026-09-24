@@ -1,3 +1,6 @@
+/** Общая громкость звуков калитки — примерно на уровне скрипа двери офиса. */
+const GATE_VOLUME = 0.2;
+
 /** Короткие процедурные звуки объектов — без внешних файлов. */
 export class Sfx {
 	private ctx: AudioContext | null = null;
@@ -39,5 +42,135 @@ export class Sfx {
 		gain.connect(ctx.destination);
 		noise.start();
 		noise.stop(ctx.currentTime + duration);
+	}
+
+	/**
+	 * Железная калитка: при открытии сухой щелчок щеколды и скрип петель, при закрытии — скрип и глухой стук
+	 * о столб с коротким металлическим отзвуком. Всё из шума и резонансных фильтров — без «синтезаторных» тонов.
+	 */
+	gate(opening: boolean): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const out = ctx.createGain();
+		out.gain.value = GATE_VOLUME;
+		out.connect(ctx.destination);
+		const t = ctx.currentTime + 0.01;
+		if (opening) {
+			this._latch(out, t);
+			this._creak(out, t + 0.08, 0.75, true);
+		} else {
+			this._creak(out, t, 0.5, false);
+			this._slam(out, t + 0.48);
+		}
+	}
+
+	/**
+	 * Скрип петли как трение «прилипание-срыв»: серия коротких щелчков с неровным интервалом (учащаются к концу хода
+	 * при открытии и замедляются при закрытии), пропущенная через пару узких резонансов металла.
+	 */
+	private _creak(out: AudioNode, start: number, duration: number, opening: boolean): void {
+		const ctx = this._context();
+		const rate = ctx.sampleRate;
+		const buffer = ctx.createBuffer(1, Math.floor(rate * duration), rate);
+		const data = buffer.getChannelData(0);
+		let time = 0;
+		while (time < duration) {
+			const progress = time / duration;
+			// Частота рывков, Гц: плавно едет и немного «спотыкается».
+			const pulseRate = (opening ? 35 + progress * 45 : 70 - progress * 40) * (0.75 + Math.random() * 0.5);
+			const at = Math.floor(time * rate);
+			const len = Math.floor(rate * 0.004);
+			const amp = 0.5 + Math.random() * 0.5;
+			for (let i = 0; i < len && at + i < data.length; i++) data[at + i] += (Math.random() * 2 - 1) * amp * (1 - i / len);
+			time += 1 / pulseRate;
+		}
+		const source = ctx.createBufferSource();
+		source.buffer = buffer;
+
+		const envelope = ctx.createGain();
+		envelope.gain.setValueAtTime(0.0001, start);
+		envelope.gain.linearRampToValueAtTime(1, start + 0.08);
+		envelope.gain.setValueAtTime(1, start + duration * 0.75);
+		envelope.gain.linearRampToValueAtTime(0.0001, start + duration);
+		envelope.connect(out);
+
+		for (const [freq, q, level] of [
+			[1150, 9, 0.9],
+			[2300, 12, 0.5],
+		] as const) {
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.frequency.value = freq * (opening ? 1 : 0.92);
+			band.Q.value = q;
+			const gain = ctx.createGain();
+			gain.gain.value = level;
+			source.connect(band);
+			band.connect(gain);
+			gain.connect(envelope);
+		}
+		source.start(start);
+	}
+
+	/** Щеколда: короткий сухой щелчок — высокий шум в несколько миллисекунд. */
+	private _latch(out: AudioNode, start: number): void {
+		const burst = this._noiseBurst(0.012);
+		const ctx = this._context();
+		const filter = ctx.createBiquadFilter();
+		filter.type = 'bandpass';
+		filter.frequency.value = 3200;
+		filter.Q.value = 2;
+		const gain = ctx.createGain();
+		gain.gain.value = 0.22;
+		burst.connect(filter);
+		filter.connect(gain);
+		gain.connect(out);
+		burst.start(start);
+	}
+
+	/** Полотно бьётся о столб: глухой низкий стук + короткий, быстро гаснущий звон резонансов металла. */
+	private _slam(out: AudioNode, start: number): void {
+		const ctx = this._context();
+		const thud = this._noiseBurst(0.06);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = 260;
+		const thudGain = ctx.createGain();
+		thudGain.gain.setValueAtTime(0.7, start);
+		thudGain.gain.exponentialRampToValueAtTime(0.001, start + 0.12);
+		thud.connect(low);
+		low.connect(thudGain);
+		thudGain.connect(out);
+		thud.start(start);
+
+		const hit = this._noiseBurst(0.015);
+		for (const [freq, level, decay] of [
+			[640, 0.5, 0.18],
+			[1720, 0.35, 0.12],
+			[2950, 0.2, 0.08],
+		] as const) {
+			const ring = ctx.createBiquadFilter();
+			ring.type = 'bandpass';
+			ring.frequency.value = freq;
+			ring.Q.value = 25;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(level * 2.5, start);
+			gain.gain.exponentialRampToValueAtTime(0.001, start + decay);
+			hit.connect(ring);
+			ring.connect(gain);
+			gain.connect(out);
+		}
+		hit.start(start);
+	}
+
+	/** Короткий всплеск белого шума с затуханием к концу. */
+	private _noiseBurst(duration: number): AudioBufferSourceNode {
+		const ctx = this._context();
+		const length = Math.max(1, Math.floor(ctx.sampleRate * duration));
+		const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+		const data = buffer.getChannelData(0);
+		for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / length);
+		const source = ctx.createBufferSource();
+		source.buffer = buffer;
+		return source;
 	}
 }

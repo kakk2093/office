@@ -11,6 +11,7 @@ import {
 	createSandbox,
 	createFenceTexture,
 	createGate,
+	createGatePost,
 	createBush,
 	createLampPost,
 	createPullUpBar,
@@ -55,6 +56,8 @@ const YARD_MAX_X = 16;
 const YARD_MIN_Z = -22;
 const YARD_MAX_Z = 12;
 const GATE_HALF = 1.0;
+/** Зазор между полотном калитки и столбом с каждой стороны (там же половина толщины столба). */
+const GATE_GAP = 0.07;
 /** Выше игрока (глаза на 1.7): забор не перешагнуть и не заглянуть за него. */
 const FENCE_HEIGHT = 2.2;
 const FENCE_BAR_SPACING = 1.0;
@@ -69,6 +72,8 @@ const ROAD_WIDTH = ROAD_Z2 - ROAD_Z1;
 const TURN_X1 = ROAD_X2 - ROAD_WIDTH;
 const TURN_Z2 = 58;
 const CANTEEN_Z = TURN_Z2 + 6;
+/** Площадь перед столовой — с этого Z дома у поворота заканчиваются, и столовая видна целиком, вместе с вывеской. */
+const PLAZA_Z1 = 46;
 /** Бетонный забор по периметру района — дальше игрок не уходит (внутри клэмпа STREET_HALF в Game, с запасом вокруг домов). */
 const BOUNDARY_MIN_X = -56;
 const BOUNDARY_MAX_X = 66;
@@ -111,7 +116,7 @@ export class Street {
 	private readonly rain = new Rain();
 	private readonly sky = new Sky();
 	/** Начало координат полотна калитки — на петле (см. createGate): анимация — поворот группы. */
-	private readonly gateLeaf = createGate(GATE_HALF * 2, FENCE_HEIGHT);
+	private readonly gateLeaf = createGate(GATE_HALF * 2 - GATE_GAP * 2, FENCE_HEIGHT);
 	private gateOpenState = false;
 	private readonly gateClosedRot = 0;
 	/** Открыта наружу двора: полотно лежит вдоль забора. */
@@ -245,9 +250,9 @@ export class Street {
 			[-46, 27, ROAD_Z2 + 1.5, ROAD_Z2 + 3.5], // перед пятиэтажками южнее дороги
 			[-23.5, -21.5, -26, ROAD_Z1], // перед западной
 			[18, 20, -28, ROAD_Z1], // перед восточной
-			[TURN_X1 - 2.2, TURN_X1 - 0.4, ROAD_Z2 + 2, TURN_Z2 - 2], // перед домом слева от поворота
-			[ROAD_X2 + 0.4, ROAD_X2 + 3.2, ROAD_Z2 + 1, TURN_Z2 - 7], // перед домом справа от поворота
-			[31, 50, TURN_Z2 - 6, TURN_Z2], // площадка перед столовой
+			[TURN_X1 - 2.2, TURN_X1 - 0.4, ROAD_Z2 + 2, PLAZA_Z1], // перед домом слева от поворота
+			[ROAD_X2 + 0.4, ROAD_X2 + 3.2, ROAD_Z2 + 1, PLAZA_Z1 - 3], // перед домом справа от поворота
+			[27, 56, PLAZA_Z1, TURN_Z2], // площадь перед столовой
 			[20.5, 28.5, 9.3, 14.2], // площадка под контейнеры
 		] as const) {
 			this._groundPatch(x1, x2, z1, z2, 0.0035, createNoiseTexture(sidewalk, (x2 - x1) / 2, (z2 - z1) / 2, 16, 13));
@@ -268,8 +273,8 @@ export class Street {
 		curb(ROAD_X1, -1.4, ROAD_Z1, ROAD_Z1);
 		curb(1.4, ROAD_X2, ROAD_Z1, ROAD_Z1);
 		curb(ROAD_X1, TURN_X1, ROAD_Z2, ROAD_Z2);
-		curb(TURN_X1, TURN_X1, ROAD_Z2, TURN_Z2 - 6);
-		curb(ROAD_X2, ROAD_X2, ROAD_Z1, TURN_Z2 - 6);
+		curb(TURN_X1, TURN_X1, ROAD_Z2, PLAZA_Z1);
+		curb(ROAD_X2, ROAD_X2, ROAD_Z1, PLAZA_Z1);
 	}
 
 	/** Пятиэтажки. Поворот π — подъезды на север, π/2 — на восток, −π/2 — на запад, 0 — на юг. */
@@ -280,8 +285,8 @@ export class Street {
 			[13, 30, 28, 2, Math.PI, '#bdb9ae'],
 			[-30, -6, 40, 3, Math.PI / 2, '#cdbfa8'], // слева от двора
 			[27, -11, 34, 3, -Math.PI / 2, '#c4c0b6'], // справа от двора
-			[29, 47, 18, 2, Math.PI / 2, '#cbc5b8'], // слева от поворота
-			[53, 36, 30, 3, -Math.PI / 2, '#b8b4aa'], // справа от поворота
+			[29, 42, 8, 1, Math.PI / 2, '#cbc5b8'], // слева от поворота — короткий, до площади
+			[53, 32, 22, 2, -Math.PI / 2, '#b8b4aa'], // справа от поворота — тоже до площади
 			[-20, 52, 40, 3, Math.PI, '#c6bda9'], // второй ряд за дорогой
 			[54, -2, 26, 2, -Math.PI / 2, '#cfc8ba'], // за восточной
 			[0, -40, 44, 3, 0, '#c2beb4'], // позади большого дома
@@ -304,24 +309,41 @@ export class Street {
 			[0, 1.3, 0.85],
 		];
 		// [x, z, поворот]: π/2 и −π/2 — вдоль основной дороги, 0 и π — вдоль отрезка после поворота.
+		// Дорога узкая: машины на разных её сторонах стоят не ближе 7 м друг от друга вдоль дороги — иначе вдвоём перекрывают проезд.
 		const cars: [number, number, number][] = [
 			[-42, ROAD_Z1 + 1.1, Math.PI / 2],
 			[-20, ROAD_Z1 + 1.1, Math.PI / 2],
 			[-14.5, ROAD_Z1 + 1.1, -Math.PI / 2],
 			[9, ROAD_Z1 + 1.1, Math.PI / 2],
 			[-33, ROAD_Z2 - 1.1, -Math.PI / 2],
-			[4, ROAD_Z2 - 1.1, -Math.PI / 2],
+			[-4, ROAD_Z2 - 1.1, -Math.PI / 2],
 			[30, ROAD_Z2 - 1.1, Math.PI / 2],
 			[TURN_X1 + 1.1, 28, 0],
 			[TURN_X1 + 1.1, 44, Math.PI],
 			[ROAD_X2 - 1.1, 35, Math.PI],
-			[47.5, TURN_Z2 - 3, -Math.PI / 2],
+			[53.5, PLAZA_Z1 + 3, 0.1], // у края площади, не перед фасадом
 		];
 		cars.forEach(([x, z, rot], i) => this._place(createCar(CAR_COLORS[i % CAR_COLORS.length]), x, z, rot + (i % 3) * 0.03, carCircles));
 
+		// Площадь перед столовой: по краям скамейки с урнами (лицом к центру) и фонари кронштейном над площадью;
+		// середина и подход к ступеням свободны.
+		for (const [x, rot] of [
+			[31.8, Math.PI / 2],
+			[49.2, -Math.PI / 2],
+		] as const) {
+			for (const z of [PLAZA_Z1 + 4.5, PLAZA_Z1 + 7.5]) this._place(createBench(), x, z, rot, [[0, 0, 0.8]]);
+			this._place(createTrashBin(), x, PLAZA_Z1 + 6, 0, [[0, 0, 0.3]]);
+		}
+		for (const [x, rot] of [
+			[30, 0],
+			[51, Math.PI],
+		] as const) {
+			for (const z of [PLAZA_Z1 + 2.5, PLAZA_Z1 + 9.5]) this._place(createLampPost(), x, z, rot, [[0, 0, 0.15]]);
+		}
+
 		// Фонари: вдоль северной обочины кронштейном над дорогой, вдоль отрезка после поворота — с западной стороны.
 		for (const x of [-44, -30, -16, 14, 28, 40]) this._place(createLampPost(), x, ROAD_Z1 - 0.7, -Math.PI / 2, [[0, 0, 0.15]]);
-		for (const z of [27, 39, 51]) this._place(createLampPost(), TURN_X1 - 0.6, z, 0, [[0, 0, 0.15]]);
+		for (const z of [27, 39]) this._place(createLampPost(), TURN_X1 - 0.6, z, 0, [[0, 0, 0.15]]);
 
 		const trees: [number, number, number, string][] = [
 			[-40, ROAD_Z2 + 0.8, 0.9, '#9c5a2a'],
@@ -551,11 +573,17 @@ export class Street {
 		this.scene.add(sill);
 	}
 
-	/** Калитка в проёме забора (петля — с западного края), закрыта по умолчанию. */
+	/** Калитка в проёме забора между двумя столбами (петля — у западного), закрыта по умолчанию. */
 	private _buildGate(): void {
-		this.gateLeaf.position.set(-GATE_HALF, 0, this.gate.z);
+		this.gateLeaf.position.set(-GATE_HALF + GATE_GAP, 0, this.gate.z);
 		this.gateLeaf.rotation.y = this.gateClosedRot;
 		this.scene.add(this.gateLeaf);
+		// Столбы по краям проёма — на них висит полотно и о них оно стукается при закрытии.
+		for (const x of [-GATE_HALF, GATE_HALF]) {
+			const post = createGatePost(FENCE_HEIGHT + 0.1);
+			post.position.set(this.gate.x + x, 0, this.gate.z);
+			this.scene.add(post);
+		}
 
 		const mid = this.colliders.add(this.gate.x, this.gate.z, GATE_HALF * 0.72);
 		this.gateColliders = [mid];
