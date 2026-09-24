@@ -1,11 +1,31 @@
 import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
 import { Rain } from './Rain.js';
-import { createBench, createTrashBin, createTree, createSandbox, createFenceTexture, createGate } from './YardProps.js';
+import { Sky, SKY_HORIZON, SUN_DIRECTION } from './Sky.js';
+import { createPanelBuilding, createCanteen, createYardRoadTexture, PANEL_BUILDING_DEPTH, CANTEEN_SIZE } from './Buildings.js';
+import {
+	createBench,
+	createTrashBin,
+	createTree,
+	createSandbox,
+	createFenceTexture,
+	createGate,
+	createBush,
+	createLampPost,
+	createPullUpBar,
+	createCarpetRack,
+	createSwing,
+	createSlide,
+	createCar,
+	createPuddle,
+	createLeafLitter,
+	createNoiseTexture,
+} from './YardProps.js';
 
 const SIZE = 120;
-const FOG_FAR = 55;
-const SKY_COLOR = '#b3ac9e';
+/** Пасмурная дымка: верх дома и дальние планы размываются, двор виден чётко. */
+const FOG_NEAR = 6;
+const FOG_FAR = 42;
 
 const FLOORS = 17;
 const FLOOR_HEIGHT = 3;
@@ -25,6 +45,15 @@ const GATE_HALF = 1.0;
 const FENCE_HEIGHT = 2.2;
 const FENCE_BAR_SPACING = 1.0;
 const GATE_ANIM_TIME = 0.5;
+/** Дворовая дорога за забором (вдоль X) и столовая в её восточном конце. */
+const ROAD_X1 = -50;
+const ROAD_X2 = 30;
+const ROAD_Z1 = YARD_MAX_Z + 3;
+const ROAD_Z2 = ROAD_Z1 + 5;
+const CANTEEN_X = 40;
+/** Коллайдеры забора: шаг меньше диаметра игрока (0.7) — между кругами не протиснуться. */
+const FENCE_COLLIDER_STEP = 0.5;
+const FENCE_COLLIDER_RADIUS = 0.25;
 
 export interface SpawnPoint {
 	x: number;
@@ -45,6 +74,7 @@ export class Street {
 	/** Калитка в заборе — со стороны спавна. */
 	readonly gate: GatePoint = { x: 0, z: YARD_MAX_Z };
 	private readonly rain = new Rain();
+	private readonly sky = new Sky();
 	/** Начало координат полотна калитки — на петле (см. createGate): анимация — поворот группы. */
 	private readonly gateLeaf = createGate(GATE_HALF * 2, FENCE_HEIGHT);
 	private gateOpenState = false;
@@ -61,27 +91,23 @@ export class Street {
 	}
 
 	constructor(private readonly colliders: CircleColliders) {
-		this.scene.background = new THREE.Color(SKY_COLOR);
-		this.scene.fog = new THREE.Fog(SKY_COLOR, 10, FOG_FAR);
-		this.scene.add(new THREE.AmbientLight('#ffffff', 0.65));
-		const sun = new THREE.DirectionalLight('#d7d0c0', 0.5);
-		sun.position.set(4, 6, 3);
+		// Туман — цвета горизонта: дальние планы растворяются в небе, а не в сером пятне.
+		this.scene.background = new THREE.Color(SKY_HORIZON);
+		this.scene.fog = new THREE.Fog(SKY_HORIZON, FOG_NEAR, FOG_FAR);
+		this.scene.add(new THREE.HemisphereLight('#b3b6b9', '#5f5648', 0.95));
+		const sun = new THREE.DirectionalLight('#c9c8c4', 0.25);
+		sun.position.copy(SUN_DIRECTION).multiplyScalar(20);
 		this.scene.add(sun);
+		this.scene.add(this.sky.group);
 
-		const ground = new THREE.Mesh(
-			new THREE.PlaneGeometry(SIZE, SIZE),
-			new THREE.MeshStandardMaterial({ color: '#8b8479' })
-		);
-		ground.rotation.x = -Math.PI / 2;
-		ground.receiveShadow = true;
-		this.scene.add(ground);
-
+		this._buildGround();
 		this._buildBuilding();
 		this._buildBlackDoor();
 		this._registerFacadeColliders(colliders);
 		this._buildFence(colliders);
 		this._buildGate();
 		this._buildYardProps();
+		this._buildDistrict();
 
 		this.scene.add(this.rain.points);
 	}
@@ -91,9 +117,10 @@ export class Street {
 		return 0;
 	}
 
-	/** Дождь и анимация калитки — на каждый кадр. */
+	/** Дождь, облака и анимация калитки — на каждый кадр. */
 	update(dt: number, cameraPosition: THREE.Vector3): void {
 		this.rain.update(dt, cameraPosition);
+		this.sky.update(dt, cameraPosition);
 		if (this.gateAnimT < 1) {
 			this.gateAnimT = Math.min(1, this.gateAnimT + dt / GATE_ANIM_TIME);
 			const eased = 1 - (1 - this.gateAnimT) ** 3;
@@ -115,6 +142,122 @@ export class Street {
 			const mid = this.colliders.add(this.gate.x, this.gate.z, GATE_HALF * 0.72);
 			this.gateColliders = [mid];
 		}
+	}
+
+	/** Земля: осенняя трава с проплешинами везде, поверх — асфальт дорожек и парковок, площадка с песком. */
+	private _buildGround(): void {
+		const grass = new THREE.Mesh(
+			new THREE.PlaneGeometry(SIZE, SIZE),
+			new THREE.MeshStandardMaterial({
+				map: createNoiseTexture(['#7d7e48', '#88844c', '#767843', '#948652', '#837547', '#78804b'], SIZE / 4, SIZE / 4),
+			})
+		);
+		grass.rotation.x = -Math.PI / 2;
+		grass.receiveShadow = true;
+		this.scene.add(grass);
+
+		const asphalt = ['#5c5d5f', '#58595b', '#616264', '#555658'];
+		// [x1, x2, z1, z2] — прямоугольники асфальта во дворе.
+		const paved: [number, number, number, number][] = [
+			[-12.5, 12.5, -8, -5.2], // тротуар вдоль фасада
+			[-1.4, 1.4, -5.2, YARD_MAX_Z + 3.2], // дорожка от подъезда к калитке и до дороги
+			[-15.8, -12, -14.5, -3.8], // парковка слева
+			[12, 15.8, -8, -3], // парковка справа
+		];
+		for (const [x1, x2, z1, z2] of paved) {
+			this._groundPatch(x1, x2, z1, z2, 0.003, createNoiseTexture(asphalt, (x2 - x1) / 2, (z2 - z1) / 2, 16, 5));
+		}
+
+		// Площадка под качелями и горкой — утоптанная земля с песком.
+		const dirt = new THREE.Mesh(
+			new THREE.CircleGeometry(4.2, 12),
+			new THREE.MeshStandardMaterial({
+				map: createNoiseTexture(['#8c7657', '#94805f', '#7f6b4f', '#9b8a68'], 4, 4, 16, 9),
+			})
+		);
+		dirt.rotation.x = -Math.PI / 2;
+		dirt.position.set(9, 0.002, 2);
+		dirt.scale.set(1.1, 0.85, 1);
+		dirt.receiveShadow = true;
+		this.scene.add(dirt);
+
+	}
+
+	/** Район за забором: дворовая дорога без разметки вдоль южной стороны, панельные пятиэтажки вокруг,
+	 * в восточном конце дороги — столовая «Спутник» фасадом к дороге. */
+	private _buildDistrict(): void {
+		// Дорога и тротуары — [x1, x2, z1, z2].
+		this._groundPatch(ROAD_X1, ROAD_X2, ROAD_Z1, ROAD_Z2, 0.004, createYardRoadTexture((ROAD_X2 - ROAD_X1) / 8));
+		const sidewalk = ['#6a6a6b', '#666667', '#707071', '#636364'];
+		for (const [x1, x2, z1, z2] of [
+			[-46, 27, ROAD_Z2 + 1.5, ROAD_Z2 + 3.5], // перед пятиэтажками южнее дороги
+			[-23.5, -21.5, -26, ROAD_Z1], // перед западной
+			[18, 20, -28, ROAD_Z1], // перед восточной
+			[ROAD_X2, 34, ROAD_Z1 - 5, ROAD_Z2 + 5], // площадка перед столовой
+		] as const) {
+			this._groundPatch(x1, x2, z1, z2, 0.0035, createNoiseTexture(sidewalk, (x2 - x1) / 2, (z2 - z1) / 2, 16, 13));
+		}
+
+		// Бордюры; на северной стороне — разрыв под дорожку от калитки.
+		const curbMat = new THREE.MeshStandardMaterial({ color: '#9d9a92' });
+		for (const [x1, x2, z] of [
+			[ROAD_X1, -1.4, ROAD_Z1],
+			[1.4, ROAD_X2, ROAD_Z1],
+			[ROAD_X1, ROAD_X2, ROAD_Z2],
+		] as const) {
+			const curb = new THREE.Mesh(new THREE.BoxGeometry(x2 - x1, 0.12, 0.22), curbMat);
+			curb.position.set((x1 + x2) / 2, 0.06, z);
+			curb.receiveShadow = true;
+			this.scene.add(curb);
+		}
+
+		// Пятиэтажки: [центр x, центр z, длина, подъездов, поворот, цвет]. Поворот π — подъезды на север, к дороге.
+		const panels: [number, number, number, number, number, string][] = [
+			[-27, 30, 38, 3, Math.PI, '#c9c3b5'],
+			[13, 30, 28, 2, Math.PI, '#bdb9ae'],
+			[-30, -6, 40, 3, Math.PI / 2, '#cdbfa8'],
+			[27, -11, 34, 3, -Math.PI / 2, '#c4c0b6'],
+		];
+		panels.forEach(([x, z, length, sections, rot, color], i) => {
+			const building = createPanelBuilding(length, sections, color, 17 + i * 31);
+			building.position.set(x, 0, z);
+			building.rotation.y = rot;
+			this.scene.add(building);
+			const alongX = Math.abs(Math.sin(rot)) < 0.5;
+			this._rectColliders(x, z, alongX ? length : PANEL_BUILDING_DEPTH, alongX ? PANEL_BUILDING_DEPTH : length);
+		});
+
+		// Столовая в конце дороги, фасадом на запад — к дороге.
+		const canteen = createCanteen();
+		canteen.position.set(CANTEEN_X, 0, (ROAD_Z1 + ROAD_Z2) / 2);
+		canteen.rotation.y = -Math.PI / 2;
+		this.scene.add(canteen);
+		this._rectColliders(CANTEEN_X, (ROAD_Z1 + ROAD_Z2) / 2, CANTEEN_SIZE.depth, CANTEEN_SIZE.width);
+	}
+
+	/** Коллайдеры по периметру прямоугольного здания (внутрь всё равно не попасть — хватает контура). */
+	private _rectColliders(cx: number, cz: number, sizeX: number, sizeZ: number): void {
+		const step = 0.8;
+		const r = 0.5;
+		const hx = sizeX / 2;
+		const hz = sizeZ / 2;
+		for (let x = -hx; x <= hx + 0.01; x += step) {
+			this.colliders.add(cx + x, cz - hz, r);
+			this.colliders.add(cx + x, cz + hz, r);
+		}
+		for (let z = -hz; z <= hz + 0.01; z += step) {
+			this.colliders.add(cx - hx, cz + z, r);
+			this.colliders.add(cx + hx, cz + z, r);
+		}
+	}
+
+	/** Плоский прямоугольник на земле от (x1, z1) до (x2, z2) на высоте y (над травой, чтобы не мерцал). */
+	private _groundPatch(x1: number, x2: number, z1: number, z2: number, y: number, map: THREE.Texture): void {
+		const patch = new THREE.Mesh(new THREE.PlaneGeometry(x2 - x1, z2 - z1), new THREE.MeshStandardMaterial({ map }));
+		patch.rotation.x = -Math.PI / 2;
+		patch.position.set((x1 + x2) / 2, y, (z1 + z2) / 2);
+		patch.receiveShadow = true;
+		this.scene.add(patch);
 	}
 
 	/** 17-этажный белый дом, окна — процедурная пиксельная текстура на весь объём (низкополи: один бокс). */
@@ -203,46 +346,114 @@ export class Street {
 		if (vertical) mesh.rotation.y = Math.PI / 2;
 		this.scene.add(mesh);
 
-		const segments = Math.max(2, Math.round(length / 3));
+		// Мелкие частые круги: крупные у краёв проёма (r=1.7 на x=±GATE_HALF) целиком перекрывали калитку.
+		const segments = Math.max(2, Math.ceil(length / FENCE_COLLIDER_STEP));
 		for (let i = 0; i <= segments; i++) {
 			const t = i / segments;
-			colliders.add(x1 + dx * t, z1 + dz * t, 1.7);
+			colliders.add(x1 + dx * t, z1 + dz * t, FENCE_COLLIDER_RADIUS);
 		}
 	}
 
-	/** Скамейки, урны, деревья, песочница — чтобы двор читался как дворик многоквартирного дома. */
+	/** Пропсы двора многоквартирного дома. Проход от подъезда к калитке (x≈0) оставлен свободным. */
 	private _buildYardProps(): void {
-		const bench1 = createBench();
-		bench1.position.set(6, 0, -2);
-		bench1.rotation.y = -Math.PI / 2;
-		this.scene.add(bench1);
+		this._place(createBench(), 6, -2, -Math.PI / 2, [[0, 0, 0.8]]);
+		this._place(createBench(), -8, 3, Math.PI / 2, [[0, 0, 0.8]]);
+		this._place(createBench(), 4.5, 8, Math.PI, [[0, 0, 0.8]]);
+		this._place(createTrashBin(), 7.4, -3, 0, [[0, 0, 0.3]]);
+		this._place(createTrashBin(), -6.6, 4, 0, [[0, 0, 0.3]]);
+		this._place(createTrashBin(), 3.2, -6.8, 0, [[0, 0, 0.3]]);
 
-		const bench2 = createBench();
-		bench2.position.set(-8, 0, 3);
-		bench2.rotation.y = Math.PI / 2;
-		this.scene.add(bench2);
-
-		const bin1 = createTrashBin();
-		bin1.position.set(7.4, 0, -3);
-		this.scene.add(bin1);
-
-		const bin2 = createTrashBin();
-		bin2.position.set(-6.6, 0, 4);
-		this.scene.add(bin2);
-
-		for (const [x, z] of [
-			[10, -4],
-			[-11, -3],
-			[9, 7],
-		] as const) {
-			const tree = createTree();
-			tree.position.set(x, 0, z);
-			this.scene.add(tree);
+		// Деревья: [x, z, масштаб, цвет листвы]. Часть — в полосах сбоку и позади дома.
+		const trees: [number, number, number, string][] = [
+			[10, -4, 1.1, '#8a6a3d'],
+			[-11, -3, 1.0, '#9c5a2a'],
+			[9, 7, 1.25, '#a8872f'],
+			[-14, 10, 0.9, '#8a6a3d'],
+			[13.5, 11, 1.0, '#9c5a2a'],
+			[-5.5, 10, 0.85, '#a8872f'],
+			[14, -12, 1.2, '#8a6a3d'],
+			[-14, -15, 1.1, '#a8872f'],
+			[14, -18, 1.0, '#9c5a2a'],
+		];
+		for (const [x, z, scale, color] of trees) {
+			this._place(createTree(scale, color), x, z, x * 1.7 + z, [[0, 0, 0.35 * scale]]);
+			this._place(createLeafLitter(2.2 * scale, color), x + 0.4, z - 0.3);
 		}
 
-		const sandbox = createSandbox();
-		sandbox.position.set(2.5, 0, 9);
-		this.scene.add(sandbox);
+		for (const [x, z, s] of [
+			[-7, -7, 1],
+			[-9, -7.2, 0.8],
+			[-5.2, -7.1, 0.9],
+			[7, -7, 1],
+			[9.2, -7.1, 0.85],
+			[15, 4, 1.1],
+			[15, 1.8, 0.9],
+			[-15, 6, 1],
+		] as const) {
+			this._place(createBush(s), x, z, x, [[0, 0, 0.7 * s]]);
+		}
+
+		// Детская площадка — восточная половина двора.
+		this._place(createSandbox(), 2.5, 9);
+		this._place(createSwing(), 7, 3, Math.PI / 2, [
+			[-1.2, 0, 0.4],
+			[1.2, 0, 0.4],
+		]);
+		this._place(createSlide(), 11.5, 1, -Math.PI / 2, [
+			[0, 0, 0.7],
+			[0, 1.5, 0.4],
+		]);
+
+		// Западная половина: турник, выбивалка, машины вдоль забора.
+		this._place(createPullUpBar(), -9, 8.5, 0, [
+			[-0.7, 0, 0.15],
+			[0.7, 0, 0.15],
+		]);
+		this._place(createCarpetRack(), -13.5, 1.5, Math.PI / 2, [
+			[-1.3, 0, 0.15],
+			[1.3, 0, 0.15],
+		]);
+		const carCircles: [number, number, number][] = [
+			[0, -1.3, 0.85],
+			[0, 0, 0.85],
+			[0, 1.3, 0.85],
+		];
+		this._place(createCar('#7a2b25'), -13.8, -6.5, 0, carCircles);
+		this._place(createCar('#d8d2c0'), 13.8, -5.5, Math.PI, carCircles);
+		this._place(createCar('#3d5566'), -13.8, -12, 0.05, carCircles);
+
+		for (const [x, z] of [
+			[-4, -6.5],
+			[4.5, -6.5],
+			[-2.2, 4],
+			[2.2, 11],
+		] as const) {
+			this._place(createLampPost(), x, z, x < 0 ? 0 : Math.PI, [[0, 0, 0.15]]);
+		}
+
+		for (const [x, z, w, d] of [
+			[1, 2, 2.4, 1.3],
+			[-4.5, 7, 1.6, 1.0],
+			[8.5, -5.5, 2.0, 1.4],
+			[-1, -3, 1.2, 0.8],
+		] as const) {
+			this._place(createPuddle(w, d), x, z);
+		}
+	}
+
+	/** Ставит объект в сцену с поворотом вокруг вертикали; circles — коллайдеры в локальных координатах [x, z, r]. */
+	private _place(obj: THREE.Object3D, x: number, z: number, rotY = 0, circles: [number, number, number][] = []): void {
+		obj.position.x = x;
+		obj.position.z = z;
+		// Плоские пятна (лужи, листья) уже положены на землю поворотом по X — вертикаль у них локальная Z.
+		if (obj instanceof THREE.Mesh) obj.rotation.z = rotY;
+		else obj.rotation.y = rotY;
+		this.scene.add(obj);
+		const cos = Math.cos(rotY);
+		const sin = Math.sin(rotY);
+		for (const [lx, lz, r] of circles) {
+			this.colliders.add(x + lx * cos + lz * sin, z - lx * sin + lz * cos, r);
+		}
 	}
 
 	/** Сетка окон — низкое разрешение и NearestFilter дают пиксельный вид, как у остальной сцены. */
