@@ -23,6 +23,7 @@ import { SawedOff, type ShotgunSound } from '../world/SawedOff.js';
 import { Zombie } from '../world/People.js';
 import { Impacts, type PelletEnd } from '../world/Impacts.js';
 import { Arena, ARENA_RADIUS } from '../world/Arena.js';
+import { Bedroom } from '../world/Bedroom.js';
 
 /** Отступ от стен, на который не пускаем камеру (стены — не коллайдеры, а простой клэмп по границам). */
 const WALL_MARGIN = 0.4;
@@ -37,19 +38,23 @@ const FLASH_IN = 0.35;
 const FLASH_HOLD = 0.3;
 const FLASH_OUT = 1.4;
 const FLASH_COLOR = '#5c0b14';
+/** Переход через портал — цвета портала. */
+const PORTAL_FLASH_COLOR = '#bfe6ff';
+/** Конец: экран темнеет за столько секунд, потом за столько же проступает «КОНЕЦ». */
+const ENDING_FADE = 2.5;
 /** Высота «голоса» при печати реплик, Гц. */
 const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, player: 170 };
 /** За сколько секунд затихает музыка, пока игрок доедает солянку. */
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
-const DEBUG_START_AT_CANTEEN = true;
+const DEBUG_START_AT_CANTEEN = false;
 /** Отладка: начинать сразу на арене (ад) — с обрезом в руках. */
 const DEBUG_START_AT_ARENA = false;
 /** Дальность прорисовки камеры: в помещениях и на улице хватает 100 м, на арене видны горы и небо вдали. */
 const CAMERA_FAR = 100;
 const ARENA_CAMERA_FAR = 600;
 /** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
-const DEBUG_SKIP_INTRO = true;
+const DEBUG_SKIP_INTRO = false;
 /** Отладка: начинать с обрезом в руках (иначе он убран до конца побега в столовой). ЛКМ — дуплет (после него
  * сама перезарядка), R — перезарядка. Достаёт его только катсцена побега в столовой. */
 const DEBUG_SHOTGUN = false;
@@ -97,7 +102,7 @@ const START_DESCRIPTION = [
 const STREET_HALF = 74;
 
 /** Где сейчас игрок: у каждого места своя сцена и свои коллайдеры, в пространстве они не связаны. */
-type Place = 'office' | 'street' | 'canteen' | 'arena';
+type Place = 'office' | 'street' | 'canteen' | 'arena' | 'bedroom';
 
 /** Композиция: рендерер, цикл, ресайз. Логика — в Room / Street / PlayerController. */
 export class Game {
@@ -149,6 +154,10 @@ export class Game {
 	readonly street: Street;
 	readonly canteen: Canteen;
 	readonly arena: Arena;
+	/** Финал: комната, где спит пёс. */
+	readonly bedroom = new Bedroom();
+	/** Чёрный экран с надписью «КОНЕЦ» (по окончании финала). */
+	private readonly ending = document.createElement('div');
 	readonly player: PlayerController;
 	/** Обрез: висит на камере; убран, пока герой не достанет его в конце побега (или сразу в руках — DEBUG_SHOTGUN). */
 	private readonly shotgun = new SawedOff();
@@ -233,7 +242,11 @@ export class Game {
 		}
 		// Кинорамка — на каждый диалог (и на вступление: выезжает вместе с ним, через секунду после «Старт»).
 		this.letterbox = new Letterbox();
-		this.flash.style.background = FLASH_COLOR;
+		// Финал: камеру ведёт комната; после реплики — «КОНЕЦ».
+		this.bedroom.onCameraPose = (pose) => this.player.setPose(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
+		this.bedroom.onDialogue = (dialogue) => this._startDialogue(dialogue);
+		this.bedroom.onFinished = () => this._showEnding();
+		this._buildEnding();
 		this.dialogue.onBlip = (voice) => this.sfx.voice(VOICE_PITCH[voice]);
 		this.dialogue.onEnd = (sound) => {
 			this._playSound(sound);
@@ -335,7 +348,7 @@ export class Game {
 		}
 
 		// Во время разговора стоим на месте; движение мыши сбрасываем, чтобы после не было рывка взгляда.
-		if (this.dialogue.active || this.introPending) this.input.consumeMouseDelta();
+		if (this.dialogue.active || this.introPending || this.place === 'bedroom') this.input.consumeMouseDelta();
 		else if (this.place === 'arena' && this.arena.cutsceneActive) {
 			// Катсцена босса: управления нет, взгляд сам поворачивается к голове.
 			this.input.consumeMouseDelta();
@@ -344,6 +357,8 @@ export class Game {
 		this.dialogue.update(dt);
 		this.room.update(dt);
 		if (this.place === 'arena') this.arena.update(dt, this.camera.position);
+		// Финал идёт сам, пока экран после перехода проясняется.
+		if (this.place === 'bedroom') this.bedroom.update(dt);
 		this._updateCameraFar();
 		this._updateShotgun(dt);
 		this._updateInteraction();
@@ -563,6 +578,7 @@ export class Game {
 	private _objective(): { text: string; at: THREE.Vector3 | null } | null {
 		if (this.flashTime !== null) return null;
 		if (this.place === 'arena') return this.arena.objective;
+		if (this.place === 'bedroom') return null;
 		if (this.place === 'canteen') return this.canteen.objective;
 		if (this.place === 'street') return this.street.objective(this.camera.position);
 		return this.introPending || this.firstObjectiveTimer !== null ? null : this.room.objective;
@@ -578,6 +594,7 @@ export class Game {
 
 	private _scene(): THREE.Scene {
 		if (this.place === 'arena') return this.arena.scene;
+		if (this.place === 'bedroom') return this.bedroom.scene;
 		if (this.place === 'street') return this.street.scene;
 		if (this.place === 'canteen') return this.canteen.scene;
 		return this.room.scene;
@@ -633,6 +650,10 @@ export class Game {
 			if (Math.hypot(this.camera.position.x - redDoor.x, this.camera.position.z - redDoor.z) < RED_DOOR_REACH) {
 				this._beginTransition('arena');
 			}
+		}
+		// Портал на арене: вошёл — переход цвета портала в финал.
+		if (this.place === 'arena' && this.flashTime === null && this.arena.portalReached(this.camera.position)) {
+			this._beginTransition('bedroom');
 		}
 		const action = this.flashTime === null ? this._nearbyInteraction() : null;
 		if (!action) {
@@ -691,7 +712,7 @@ export class Game {
 			};
 		}
 
-		if (this.place === 'arena') return null;
+		if (this.place === 'arena' || this.place === 'bedroom') return null;
 
 		if (this.place === 'canteen') {
 			// Сначала — предмет в прицеле (подносы, хлеб), потом дверь.
@@ -733,8 +754,42 @@ export class Game {
 		return null;
 	}
 
+	/** Экран «КОНЕЦ»: чёрная заливка поверх всего, в центре — надпись; оба пока прозрачные. */
+	private _buildEnding(): void {
+		Object.assign(this.ending.style, {
+			position: 'fixed',
+			inset: '0',
+			background: '#000',
+			opacity: '0',
+			pointerEvents: 'none',
+			zIndex: '30',
+			display: 'flex',
+			alignItems: 'center',
+			justifyContent: 'center',
+			transition: `opacity ${ENDING_FADE}s ease-in-out`,
+		});
+		const title = document.createElement('div');
+		title.textContent = 'КОНЕЦ';
+		Object.assign(title.style, {
+			color: '#fff',
+			font: '600 64px system-ui, sans-serif',
+			letterSpacing: '0.4em',
+			opacity: '0',
+			transition: `opacity ${ENDING_FADE}s ease-in-out ${ENDING_FADE}s`,
+		});
+		this.ending.appendChild(title);
+		document.body.appendChild(this.ending);
+	}
+
+	/** Конец игры: экран медленно темнеет, потом проступает «КОНЕЦ». */
+	private _showEnding(): void {
+		this.ending.style.opacity = '1';
+		(this.ending.firstChild as HTMLElement).style.opacity = '1';
+	}
+
 	/** Мягкое багровое затемнение на весь экран: в середине хода — смена сцены и телепорт, к концу — исчезает. */
 	private _beginTransition(destination: Place): void {
+		this.flash.style.background = destination === 'bedroom' ? PORTAL_FLASH_COLOR : FLASH_COLOR;
 		this.destination = destination;
 		this.flashTime = 0;
 		this.flashTeleported = false;
@@ -793,6 +848,16 @@ export class Game {
 		}
 		const from = this.place;
 		this.place = this.destination;
+		if (this.place === 'bedroom') {
+			// Проснулся: ад позади — тишина, обрез не нужен, здоровье полное; дальше всё идёт само.
+			this.arenaMusic.stop();
+			this.shotgun.holsterNow();
+			this.hurt = 0;
+			this.vignetteShown = 0;
+			this.hurtPulse = 0;
+			this.bedroom.start();
+			return;
+		}
 		if (this.place === 'arena') {
 			// В ад: бой с начала, свои коллайдеры; дождь, жуткий фон и лаунж смолкают — играет метал.
 			this.player.colliders = this.arenaColliders;
@@ -840,6 +905,8 @@ export class Game {
 	/** Клэмп по границам текущей сцены — простой прямоугольник; места не пересекаются в пространстве. */
 	private _clamp(): void {
 		const pos = this.camera.position;
+		// В финале камеру ведёт катсцена.
+		if (this.place === 'bedroom') return;
 		if (this.place === 'arena') {
 			// Арена круглая — держим внутри круга (у скал и у края обрыва).
 			const limit = ARENA_RADIUS - WALL_MARGIN;

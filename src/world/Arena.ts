@@ -48,6 +48,8 @@ const PORTAL_Z = -(ARENA_RADIUS - 2.5);
 const PORTAL_Y = 2.8;
 const PORTAL_RADIUS = 2.4;
 const PORTAL_OPEN_TIME = 1.2;
+/** Ближе этого (м, по горизонтали) к центру портала — вошёл. */
+const PORTAL_ENTER = 1.5;
 
 /** Воронка портала: бледно-голубые спиральные рукава к белому центру (прозрачное — по краю). */
 function createPortalTexture(): THREE.CanvasTexture {
@@ -334,6 +336,12 @@ export class Arena {
 		this.bossDeathTime = null;
 		this._hidePortal();
 		this.bossTimer = BOSS_DELAY - 0.001;
+	}
+
+	/** Игрок (где глаза) вошёл в раскрывшийся портал — пора просыпаться. */
+	portalReached(player: THREE.Vector3): boolean {
+		if (this.portalTime === null || this.portalTime < PORTAL_OPEN_TIME) return false;
+		return Math.hypot(player.x, player.z - PORTAL_Z) < PORTAL_ENTER;
 	}
 
 	/** Катсцена босса идёт — управления нет (реплика в конце — уже обычный диалог, он и так держит на месте). */

@@ -23,6 +23,8 @@ export interface DogModel {
 	legs: DogLeg[];
 	/** Шарнир хвоста в основании: вращение по Y — виляние. */
 	tail: THREE.Group;
+	/** Шарнир головы у основания шеи: вращение по X (+) опускает морду. */
+	head: THREE.Group;
 }
 
 function part(
@@ -44,6 +46,10 @@ function part(
 const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
 
 const HIP_Y = 0.22;
+/** Шарнир головы — у основания шеи (в координатах rig). */
+const HEAD_PIVOT = { y: 0.34, z: 0.14 };
+/** Глаза собаки (середина между ними) в координатах шарнира головы — для вида от первого лица. */
+export const DOG_EYES = new THREE.Vector3(0, 0.515 - HEAD_PIVOT.y, 0.3 - HEAD_PIVOT.z);
 
 /**
  * Low-poly цвергпинчер (чёрный с рыжим). Начало координат — под лапами, морда смотрит в +Z.
@@ -59,21 +65,25 @@ export function createDogModel(): DogModel {
 	part(rig, box(0.15, 0.16, 0.34), BLACK, 0, 0.3, 0);
 	part(rig, box(0.155, 0.1, 0.06), TAN, 0, 0.27, 0.15);
 
-	// Шея и голова.
-	const neck = part(rig, box(0.09, 0.15, 0.09), BLACK, 0, 0.4, 0.17);
+	// Шея и голова: всё, что выше шеи, — на шарнире head у её основания (координаты деталей — от шарнира).
+	const head = new THREE.Group();
+	head.position.set(0, HEAD_PIVOT.y, HEAD_PIVOT.z);
+	rig.add(head);
+	const inHead = (y: number, z: number) => [y - HEAD_PIVOT.y, z - HEAD_PIVOT.z] as const;
+	const neck = part(head, box(0.09, 0.15, 0.09), BLACK, 0, ...inHead(0.4, 0.17));
 	neck.rotation.x = 0.55;
-	part(rig, box(0.11, 0.1, 0.11), BLACK, 0, 0.5, 0.23);
-	part(rig, box(0.065, 0.055, 0.1), TAN, 0, 0.475, 0.31);
-	part(rig, box(0.035, 0.03, 0.03), NOSE, 0, 0.49, 0.365);
+	part(head, box(0.11, 0.1, 0.11), BLACK, 0, ...inHead(0.5, 0.23));
+	part(head, box(0.065, 0.055, 0.1), TAN, 0, ...inHead(0.475, 0.31));
+	part(head, box(0.035, 0.03, 0.03), NOSE, 0, ...inHead(0.49, 0.365));
 
 	const legs: DogLeg[] = [];
 	for (const side of [-1, 1]) {
 		// Глаза и рыжие «брови».
-		part(rig, box(0.02, 0.025, 0.02), EYE, side * 0.045, 0.515, 0.29);
-		part(rig, box(0.025, 0.015, 0.025), TAN, side * 0.045, 0.545, 0.285);
+		part(head, box(0.02, 0.025, 0.02), EYE, side * 0.045, ...inHead(0.515, 0.29));
+		part(head, box(0.025, 0.015, 0.025), TAN, side * 0.045, ...inHead(0.545, 0.285));
 
 		// Стоячие треугольные уши.
-		const ear = part(rig, new THREE.ConeGeometry(0.04, 0.11, 3), BLACK, side * 0.045, 0.6, 0.2);
+		const ear = part(head, new THREE.ConeGeometry(0.04, 0.11, 3), BLACK, side * 0.045, ...inHead(0.6, 0.2));
 		ear.rotation.z = -side * 0.25;
 		ear.rotation.x = -0.1;
 
@@ -97,7 +107,7 @@ export function createDogModel(): DogModel {
 	tailMesh.rotation.x = -0.9;
 	rig.add(tail);
 
-	return { root, rig, legs, tail };
+	return { root, rig, legs, tail, head };
 }
 
 export interface DogHead {
