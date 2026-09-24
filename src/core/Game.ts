@@ -22,7 +22,7 @@ const FLASH_HOLD = 0.15;
 const FLASH_OUT = 0.6;
 const FLASH_COLOR = '#f5d94a';
 /** Граница уличного плейна, за которую не пускаем камеру. */
-const STREET_HALF = 56;
+const STREET_HALF = 74;
 
 /** Композиция: рендерер, цикл, ресайз. Логика — в Room / Street / PlayerController. */
 export class Game {

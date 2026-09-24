@@ -377,15 +377,6 @@ export function createPuddle(w: number, d: number): THREE.Mesh {
 	return puddle;
 }
 
-/** Опавшие листья под деревом — пятно на земле. */
-export function createLeafLitter(radius: number, color = '#94693a'): THREE.Mesh {
-	const litter = new THREE.Mesh(new THREE.CircleGeometry(radius, 9), new THREE.MeshStandardMaterial({ color }));
-	litter.rotation.x = -Math.PI / 2;
-	litter.position.y = 0.005;
-	litter.receiveShadow = true;
-	return litter;
-}
-
 /** Песочница: низкий деревянный короб + песок внутри. */
 export function createSandbox(): THREE.Group {
 	const group = new THREE.Group();
@@ -490,6 +481,439 @@ export function createNoiseTexture(palette: string[], repeatX: number, repeatY: 
 	texture.minFilter = THREE.NearestFilter;
 	texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
 	texture.repeat.set(repeatX, repeatY);
+	texture.colorSpace = THREE.SRGBColorSpace;
+	return texture;
+}
+
+/** Металлический гараж-коробка: ворота на грани +Z, лёгкий козырёк крыши. 3 × 6 м. */
+export function createGarage(color = '#6b5a48'): THREE.Group {
+	const group = new THREE.Group();
+	const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.3 });
+	const body = new THREE.Mesh(new THREE.BoxGeometry(3.0, 2.4, 6), mat);
+	body.position.y = 1.2;
+	body.castShadow = body.receiveShadow = true;
+	group.add(body);
+	const roof = new THREE.Mesh(new THREE.BoxGeometry(3.1, 0.08, 6.3), new THREE.MeshStandardMaterial({ color: '#4a4744' }));
+	roof.position.set(0, 2.44, 0.1);
+	group.add(roof);
+	// Ворота — две створки чуть другого оттенка и тёмная щель между ними.
+	const doorMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.8), roughness: 0.6, metalness: 0.3 });
+	for (const x of [-0.66, 0.66]) {
+		const leaf = new THREE.Mesh(new THREE.BoxGeometry(1.28, 2.1, 0.04), doorMat);
+		leaf.position.set(x, 1.1, 3.02);
+		group.add(leaf);
+	}
+	const lock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.05), new THREE.MeshStandardMaterial({ color: '#2a2a2a' }));
+	lock.position.set(0.1, 1.1, 3.05);
+	group.add(lock);
+	return group;
+}
+
+type TrashRand = () => number;
+
+function trashRand(seed: number): TrashRand {
+	let s = seed;
+	return () => (s = (s * 16807) % 2147483647) / 2147483647;
+}
+
+const BAG_COLORS = ['#1f2022', '#2b2d30', '#3a4a6a', '#d8d6cf', '#4a5a3a', '#262626'];
+
+/** Завязанный мусорный пакет: приплюснутый многогранник и «хвостик» узла. */
+export function createTrashBag(color = '#1f2022', scale = 1): THREE.Group {
+	const group = new THREE.Group();
+	const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.35, metalness: 0.1, flatShading: true });
+	const body = new THREE.Mesh(new THREE.IcosahedronGeometry(0.32, 0), mat);
+	body.scale.set(1, 0.8, 0.9);
+	body.position.y = 0.25;
+	body.castShadow = true;
+	group.add(body);
+	const knot = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.16, 4), mat);
+	knot.position.y = 0.55;
+	group.add(knot);
+	group.scale.setScalar(scale);
+	return group;
+}
+
+/** Картонная коробка, иногда чуть раскрытая (клапан торчит). */
+export function createCardboardBox(w = 0.5, h = 0.35, d = 0.4, open = false): THREE.Group {
+	const group = new THREE.Group();
+	const mat = new THREE.MeshStandardMaterial({ color: '#a07a4a', roughness: 0.9 });
+	const box = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+	box.position.y = h / 2;
+	box.castShadow = box.receiveShadow = true;
+	group.add(box);
+	const tape = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.005, d + 0.002), new THREE.MeshStandardMaterial({ color: '#c9b48a' }));
+	tape.position.y = h + 0.003;
+	group.add(tape);
+	if (open) {
+		const flap = new THREE.Mesh(new THREE.BoxGeometry(w, 0.01, d / 2), mat);
+		flap.position.set(0, h + 0.1, -d / 2 - 0.08);
+		flap.rotation.x = 0.9;
+		group.add(flap);
+	}
+	return group;
+}
+
+/** Пустая бутылка лёжа — зелёное или коричневое стекло. */
+export function createBottle(color = '#3f6a3a'): THREE.Group {
+	const group = new THREE.Group();
+	const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.15, metalness: 0.2 });
+	const body = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.2, 6), mat);
+	body.rotation.z = Math.PI / 2;
+	body.position.y = 0.04;
+	group.add(body);
+	const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.03, 0.08, 6), mat);
+	neck.rotation.z = Math.PI / 2;
+	neck.position.set(0.14, 0.04, 0);
+	group.add(neck);
+	return group;
+}
+
+/** Смятая бумажка/обёртка на земле — маленький кривой лоскут. */
+export function createLitterPaper(color = '#d9d4c8', size = 0.25): THREE.Mesh {
+	const paper = new THREE.Mesh(new THREE.CircleGeometry(size, 4), new THREE.MeshStandardMaterial({ color, side: THREE.DoubleSide }));
+	paper.rotation.x = -Math.PI / 2 + 0.15;
+	paper.scale.set(1, 0.7, 1);
+	paper.position.y = 0.02;
+	return paper;
+}
+
+/**
+ * Открытая мульда-контейнер: полый ящик без крышки (крышка откинута назад к стенке), внутри горка мусора
+ * — пакеты и коробки торчат над бортом. Перёд — +Z.
+ */
+export function createDumpster(color = '#3f5a44', seed = 1): THREE.Group {
+	const group = new THREE.Group();
+	const rand = trashRand(seed);
+	const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.3 });
+	const w = 1.6;
+	const h = 1.1;
+	const d = 1.0;
+	const t = 0.04;
+	const base = 0.12;
+	// Дно и четыре стенки.
+	for (const [px, py, pz, sx, sy, sz] of [
+		[0, base + t / 2, 0, w, t, d],
+		[0, base + h / 2, d / 2 - t / 2, w, h, t],
+		[0, base + h / 2, -d / 2 + t / 2, w, h, t],
+		[w / 2 - t / 2, base + h / 2, 0, t, h, d],
+		[-w / 2 + t / 2, base + h / 2, 0, t, h, d],
+	] as const) {
+		const part = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat);
+		part.position.set(px, py, pz);
+		part.castShadow = part.receiveShadow = true;
+		group.add(part);
+	}
+	// Ребро жёсткости по борту — темнее.
+	const rim = new THREE.Mesh(new THREE.BoxGeometry(w + 0.04, 0.06, d + 0.04), new THREE.MeshStandardMaterial({ color: '#2f3f33' }));
+	rim.position.y = base + h;
+	group.add(rim);
+	// Внутренняя пустота сверху выглядит тёмной — «дно» кучи мусора.
+	const inside = new THREE.Mesh(new THREE.PlaneGeometry(w - t * 2, d - t * 2), new THREE.MeshStandardMaterial({ color: '#2a2622' }));
+	inside.rotation.x = -Math.PI / 2;
+	inside.position.y = base + h * 0.7;
+	group.add(inside);
+
+	// Откинутая назад крышка — стоит почти вертикально за контейнером.
+	const lid = new THREE.Mesh(new THREE.BoxGeometry(w + 0.06, 0.04, d + 0.06), new THREE.MeshStandardMaterial({ color: '#2f3f33' }));
+	lid.geometry.translate(0, 0, -(d + 0.06) / 2);
+	lid.position.set(0, base + h, -d / 2);
+	lid.rotation.x = 1.35;
+	group.add(lid);
+
+	// Колёсики.
+	const wheelMat = new THREE.MeshStandardMaterial({ color: '#1b1b1b' });
+	for (const [x, z] of [
+		[-0.65, 0.35],
+		[0.65, 0.35],
+		[-0.65, -0.35],
+		[0.65, -0.35],
+	] as const) {
+		const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.05, 6), wheelMat);
+		wheel.rotation.z = Math.PI / 2;
+		wheel.position.set(x, 0.06, z);
+		group.add(wheel);
+	}
+
+	// Мусор внутри: пакеты разного цвета и пара коробок, верх кучи выше борта.
+	const top = base + h;
+	for (let i = 0; i < 6; i++) {
+		const bag = createTrashBag(BAG_COLORS[Math.floor(rand() * BAG_COLORS.length)], 0.8 + rand() * 0.5);
+		bag.position.set((rand() - 0.5) * (w - 0.5), top - 0.3 + rand() * 0.25, (rand() - 0.5) * (d - 0.4));
+		bag.rotation.set((rand() - 0.5) * 0.8, rand() * Math.PI, (rand() - 0.5) * 0.8);
+		group.add(bag);
+	}
+	for (let i = 0; i < 2; i++) {
+		const box = createCardboardBox(0.45 + rand() * 0.2, 0.3, 0.35, rand() < 0.5);
+		box.position.set((rand() - 0.5) * (w - 0.6), top - 0.15, (rand() - 0.5) * (d - 0.5));
+		box.rotation.set((rand() - 0.5) * 0.6, rand() * Math.PI, (rand() - 0.5) * 0.5);
+		group.add(box);
+	}
+	return group;
+}
+
+/**
+ * Навес контейнерной площадки: стойки, скатная крыша из профлиста, задняя и боковые стенки.
+ * Открыт вперёд (+Z). width × depth — по внешнему контуру, начало координат — центр основания.
+ */
+export function createDumpsterShelter(width = 6.4, depth = 2.2): THREE.Group {
+	const group = new THREE.Group();
+	const frontH = 2.7;
+	const backH = 2.45;
+	const metal = new THREE.MeshStandardMaterial({ color: '#4a4d4f', metalness: 0.4, roughness: 0.6 });
+
+	// Профлист: вертикальные рёбра текстурой.
+	const canvas = document.createElement('canvas');
+	canvas.width = 16;
+	canvas.height = 4;
+	const ctx = canvas.getContext('2d')!;
+	for (let x = 0; x < 16; x++) {
+		ctx.fillStyle = x % 4 < 2 ? '#6d7a73' : '#5b6761';
+		ctx.fillRect(x, 0, 1, 4);
+	}
+	const sheetTex = new THREE.CanvasTexture(canvas);
+	sheetTex.magFilter = sheetTex.minFilter = THREE.NearestFilter;
+	sheetTex.wrapS = sheetTex.wrapT = THREE.RepeatWrapping;
+	sheetTex.colorSpace = THREE.SRGBColorSpace;
+	const sheet = (repeatX: number) => {
+		const tex = sheetTex.clone();
+		tex.repeat.set(repeatX, 1);
+		tex.needsUpdate = true;
+		return new THREE.MeshStandardMaterial({ map: tex, metalness: 0.3, roughness: 0.6, side: THREE.DoubleSide });
+	};
+
+	for (const [x, z, hgt] of [
+		[-width / 2, depth / 2, frontH],
+		[width / 2, depth / 2, frontH],
+		[-width / 2, -depth / 2, backH],
+		[width / 2, -depth / 2, backH],
+	] as const) {
+		const post = new THREE.Mesh(new THREE.BoxGeometry(0.08, hgt, 0.08), metal);
+		post.position.set(x, hgt / 2, z);
+		post.castShadow = true;
+		group.add(post);
+	}
+
+	// Задняя стенка во всю ширину, боковые — до высоты задней.
+	const back = new THREE.Mesh(new THREE.PlaneGeometry(width, backH - 0.1), sheet(width / 1.2));
+	back.position.set(0, (backH - 0.1) / 2, -depth / 2);
+	back.castShadow = back.receiveShadow = true;
+	group.add(back);
+	for (const x of [-width / 2, width / 2]) {
+		const side = new THREE.Mesh(new THREE.PlaneGeometry(depth, backH - 0.1), sheet(depth / 1.2));
+		side.rotation.y = Math.PI / 2;
+		side.position.set(x, (backH - 0.1) / 2, 0);
+		side.castShadow = true;
+		group.add(side);
+	}
+
+	// Крыша — скат назад, с небольшим свесом.
+	const roofLen = Math.hypot(depth + 0.4, frontH - backH);
+	const roof = new THREE.Mesh(new THREE.BoxGeometry(width + 0.4, 0.05, roofLen), sheet((width + 0.4) / 1.2));
+	roof.position.set(0, (frontH + backH) / 2 + 0.03, 0);
+	roof.rotation.x = -Math.atan2(frontH - backH, depth + 0.4);
+	roof.castShadow = true;
+	group.add(roof);
+
+	const beam = new THREE.Mesh(new THREE.BoxGeometry(width, 0.1, 0.1), metal);
+	beam.position.set(0, frontH - 0.05, depth / 2);
+	group.add(beam);
+	return group;
+}
+
+/** Надписи/значки автомата — маленький пиксельный канвас. */
+function labelTexture(width: number, height: number, draw: (ctx: CanvasRenderingContext2D) => void): THREE.CanvasTexture {
+	const canvas = document.createElement('canvas');
+	canvas.width = width;
+	canvas.height = height;
+	draw(canvas.getContext('2d')!);
+	const texture = new THREE.CanvasTexture(canvas);
+	texture.magFilter = texture.minFilter = THREE.NearestFilter;
+	texture.colorSpace = THREE.SRGBColorSpace;
+	return texture;
+}
+
+/**
+ * Уличный автомат по продаже питьевой воды в свою тару: бело-синий шкаф с вывеской «ВОДА» и каплей,
+ * табличкой цены, экраном, приёмником купюр/монет и нишей с краном под бутыль. Перёд — +Z.
+ */
+export function createWaterVendingMachine(): THREE.Group {
+	const group = new THREE.Group();
+	const w = 1.3;
+	const h = 2.2;
+	const d = 1.0;
+	const front = d / 2;
+	const white = new THREE.MeshStandardMaterial({ color: '#e6e8ea', roughness: 0.5 });
+	const blue = new THREE.MeshStandardMaterial({ color: '#2f6fb3', roughness: 0.45 });
+	const dark = new THREE.MeshStandardMaterial({ color: '#23272b' });
+	const steel = new THREE.MeshStandardMaterial({ color: '#b9bec2', metalness: 0.7, roughness: 0.3 });
+
+	// Корпус на цоколе, синие боковины.
+	const plinth = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.12, d + 0.1), new THREE.MeshStandardMaterial({ color: '#7b7d7f' }));
+	plinth.position.y = 0.06;
+	group.add(plinth);
+	const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), [blue, blue, white, white, white, white]);
+	body.position.y = 0.12 + h / 2;
+	body.castShadow = body.receiveShadow = true;
+	group.add(body);
+	// Козырёк от дождя над лицевой панелью.
+	const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.08, d + 0.35), blue);
+	roof.position.set(0, 0.12 + h + 0.04, 0.12);
+	roof.castShadow = true;
+	group.add(roof);
+
+	// Вывеска «ВОДА» с каплей — светится.
+	const sign = new THREE.Mesh(
+		new THREE.PlaneGeometry(w - 0.1, 0.42),
+		new THREE.MeshStandardMaterial({
+			map: labelTexture(40, 14, (ctx) => {
+				ctx.fillStyle = '#2f6fb3';
+				ctx.fillRect(0, 0, 40, 14);
+				// Капля.
+				ctx.fillStyle = '#9fd3f5';
+				ctx.beginPath();
+				ctx.moveTo(6, 2);
+				ctx.lineTo(10, 8);
+				ctx.arc(6, 8.5, 4, 0, Math.PI);
+				ctx.closePath();
+				ctx.fill();
+				ctx.fillStyle = '#ffffff';
+				ctx.font = 'bold 10px sans-serif';
+				ctx.textBaseline = 'middle';
+				ctx.fillText('ВОДА', 13, 7.5);
+			}),
+			emissive: '#1b4f8a',
+			emissiveIntensity: 0.5,
+		})
+	);
+	sign.position.set(0, 0.12 + h - 0.28, front + 0.005);
+	group.add(sign);
+
+	// Табличка с ценой и экран.
+	const price = new THREE.Mesh(
+		new THREE.PlaneGeometry(0.5, 0.25),
+		new THREE.MeshStandardMaterial({
+			map: labelTexture(20, 10, (ctx) => {
+				ctx.fillStyle = '#f2f2ee';
+				ctx.fillRect(0, 0, 20, 10);
+				ctx.fillStyle = '#c42d22';
+				ctx.font = 'bold 7px sans-serif';
+				ctx.textAlign = 'center';
+				ctx.textBaseline = 'middle';
+				ctx.fillText('5₽/л', 10, 5.5);
+			}),
+		})
+	);
+	price.position.set(-0.28, 1.72, front + 0.005);
+	group.add(price);
+	const screen = new THREE.Mesh(
+		new THREE.PlaneGeometry(0.34, 0.22),
+		new THREE.MeshStandardMaterial({ color: '#1f3a2c', emissive: '#3f8f5a', emissiveIntensity: 0.6 })
+	);
+	screen.position.set(0.3, 1.72, front + 0.005);
+	group.add(screen);
+
+	// Приёмник купюр, монетоприёмник и кнопки «налить».
+	const billSlot = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.06, 0.04), dark);
+	billSlot.position.set(0.3, 1.48, front + 0.02);
+	group.add(billSlot);
+	const coin = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.03), steel);
+	coin.position.set(0.3, 1.33, front + 0.015);
+	group.add(coin);
+	for (const [x, color] of [
+		[-0.4, '#3fa35a'],
+		[-0.18, '#c42d22'],
+	] as const) {
+		const button = new THREE.Mesh(
+			new THREE.CylinderGeometry(0.05, 0.05, 0.04, 8),
+			new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.3 })
+		);
+		button.rotation.x = Math.PI / 2;
+		button.position.set(x, 1.42, front + 0.02);
+		group.add(button);
+	}
+
+	// Ниша налива: тёмный проём, кран сверху, решётка-поддон снизу.
+	const nicheY = 0.95;
+	const niche = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.7, 0.03), new THREE.MeshStandardMaterial({ color: '#3a4a57' }));
+	niche.position.set(0, nicheY, front + 0.005);
+	group.add(niche);
+	for (const [x, y, sw, sh] of [
+		[0, nicheY + 0.37, 0.72, 0.05],
+		[0, nicheY - 0.37, 0.72, 0.05],
+		[-0.34, nicheY, 0.05, 0.78],
+		[0.34, nicheY, 0.05, 0.78],
+	] as const) {
+		const edge = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, 0.06), steel);
+		edge.position.set(x, y, front + 0.02);
+		group.add(edge);
+	}
+	const tap = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.035, 0.14, 6), steel);
+	tap.position.set(0, nicheY + 0.26, front + 0.07);
+	group.add(tap);
+	const tray = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.03, 0.2), steel);
+	tray.position.set(0, nicheY - 0.33, front + 0.1);
+	group.add(tray);
+	return group;
+}
+
+/** Пустая 19-литровая бутыль из-под воды — голубоватый пластик, стоит на земле. */
+export function createWaterJug(): THREE.Group {
+	const group = new THREE.Group();
+	const mat = new THREE.MeshStandardMaterial({ color: '#8fc3e0', transparent: true, opacity: 0.75, roughness: 0.15 });
+	const body = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.38, 8), mat);
+	body.position.y = 0.19;
+	group.add(body);
+	const shoulder = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.14, 0.1, 8), mat);
+	shoulder.position.y = 0.43;
+	group.add(shoulder);
+	const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.04, 6), new THREE.MeshStandardMaterial({ color: '#2f6fb3' }));
+	cap.position.y = 0.5;
+	group.add(cap);
+	return group;
+}
+
+/** Плита бетонного забора (ПО-2): серый бетон с рельефом ромбами, тёмный стык по краю. Один тайл — одна плита. */
+export function createConcreteFenceTexture(repeat: number): THREE.CanvasTexture {
+	const w = 32;
+	const h = 20;
+	const canvas = document.createElement('canvas');
+	canvas.width = w;
+	canvas.height = h;
+	const ctx = canvas.getContext('2d')!;
+	let s = 21;
+	const rand = () => (s = (s * 16807) % 2147483647) / 2147483647;
+	const palette = ['#8e8c86', '#8a8882', '#93918b', '#86847e'];
+	for (let y = 0; y < h; y++) {
+		for (let x = 0; x < w; x++) {
+			ctx.fillStyle = palette[Math.floor(rand() * palette.length)];
+			ctx.fillRect(x, y, 1, 1);
+		}
+	}
+	// Рельеф ромбами: светлая грань сверху-слева, тёмная снизу-справа.
+	const cell = 4;
+	for (let y = 2; y < h - 2; y++) {
+		for (let x = 1; x < w - 1; x++) {
+			const u = (x + y) % cell;
+			const v = (x - y + 64) % cell;
+			if (u === 0 || v === 0) {
+				ctx.fillStyle = (x + y) % 8 < 4 ? '#a19f99' : '#76746f';
+				ctx.fillRect(x, y, 1, 1);
+			}
+		}
+	}
+	// Гладкие поля сверху/снизу и стык между плитами.
+	ctx.fillStyle = '#8f8d87';
+	ctx.fillRect(0, 0, w, 2);
+	ctx.fillRect(0, h - 2, w, 2);
+	ctx.fillStyle = '#5f5d59';
+	ctx.fillRect(0, 0, 1, h);
+	const texture = new THREE.CanvasTexture(canvas);
+	texture.magFilter = THREE.NearestFilter;
+	texture.minFilter = THREE.NearestFilter;
+	texture.wrapS = THREE.RepeatWrapping;
+	texture.wrapT = THREE.ClampToEdgeWrapping;
+	texture.repeat.set(repeat, 1);
 	texture.colorSpace = THREE.SRGBColorSpace;
 	return texture;
 }

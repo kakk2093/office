@@ -18,11 +18,21 @@ import {
 	createSlide,
 	createCar,
 	createPuddle,
-	createLeafLitter,
 	createNoiseTexture,
+	createGarage,
+	createDumpster,
+	createDumpsterShelter,
+	createTrashBag,
+	createCardboardBox,
+	createBottle,
+	createLitterPaper,
+	createWaterVendingMachine,
+	createWaterJug,
+	createConcreteFenceTexture,
 } from './YardProps.js';
 
-const SIZE = 120;
+/** Размер земли — с запасом за клэмпом игрока (STREET_HALF в Game), чтобы край земли не был виден сквозь туман. */
+const SIZE = 240;
 /** Пасмурная дымка: верх дома и дальние планы размываются, двор виден чётко. */
 const FOG_NEAR = 6;
 const FOG_FAR = 42;
@@ -45,12 +55,26 @@ const GATE_HALF = 1.0;
 const FENCE_HEIGHT = 2.2;
 const FENCE_BAR_SPACING = 1.0;
 const GATE_ANIM_TIME = 0.5;
-/** Дворовая дорога за забором (вдоль X) и столовая в её восточном конце. */
+/** Дворовая дорога за забором: вдоль X на восток, затем поворот направо (на юг, +Z) — в её конце столовая. */
 const ROAD_X1 = -50;
-const ROAD_X2 = 30;
+const ROAD_X2 = 43;
 const ROAD_Z1 = YARD_MAX_Z + 3;
 const ROAD_Z2 = ROAD_Z1 + 5;
-const CANTEEN_X = 40;
+const ROAD_WIDTH = ROAD_Z2 - ROAD_Z1;
+/** Отрезок после поворота: x от TURN_X1 до ROAD_X2, z от ROAD_Z2 до TURN_Z2. */
+const TURN_X1 = ROAD_X2 - ROAD_WIDTH;
+const TURN_Z2 = 58;
+const CANTEEN_Z = TURN_Z2 + 6;
+/** Бетонный забор по периметру района — дальше игрок не уходит (внутри клэмпа STREET_HALF в Game, с запасом вокруг домов). */
+const BOUNDARY_MIN_X = -56;
+const BOUNDARY_MAX_X = 66;
+const BOUNDARY_MIN_Z = -52;
+const BOUNDARY_MAX_Z = 73;
+/** Выше глаз (1.7) — не заглянуть и не перелезть. */
+const BOUNDARY_HEIGHT = 2.5;
+/** Длина одной плиты. */
+const BOUNDARY_PANEL = 4;
+const CAR_COLORS = ['#7a2b25', '#d8d2c0', '#3d5566', '#5a6b3a', '#b8a13a', '#2e2f33', '#8a8f94', '#6a3f5c'];
 /** Коллайдеры забора: шаг меньше диаметра игрока (0.7) — между кругами не протиснуться. */
 const FENCE_COLLIDER_STEP = 0.5;
 const FENCE_COLLIDER_RADIUS = 0.25;
@@ -108,6 +132,7 @@ export class Street {
 		this._buildGate();
 		this._buildYardProps();
 		this._buildDistrict();
+		this._buildBoundary();
 
 		this.scene.add(this.rain.points);
 	}
@@ -183,40 +208,71 @@ export class Street {
 
 	}
 
-	/** Район за забором: дворовая дорога без разметки вдоль южной стороны, панельные пятиэтажки вокруг,
-	 * в восточном конце дороги — столовая «Спутник» фасадом к дороге. */
+	/** Район за забором: дворовая дорога без разметки вдоль южной стороны, за последними домами — поворот направо,
+	 * в конце — столовая «Спутник» фасадом к дороге. Вокруг — пятиэтажки, машины, гаражи, мелочи. */
 	private _buildDistrict(): void {
-		// Дорога и тротуары — [x1, x2, z1, z2].
+		this._buildRoads();
+		this._buildPanels();
+		this._buildDistrictProps();
+
+		const canteen = createCanteen();
+		canteen.position.set((TURN_X1 + ROAD_X2) / 2, 0, CANTEEN_Z);
+		canteen.rotation.y = Math.PI; // фасадом на север — к дороге
+		this.scene.add(canteen);
+		this._rectColliders((TURN_X1 + ROAD_X2) / 2, CANTEEN_Z, CANTEEN_SIZE.width, CANTEEN_SIZE.depth);
+	}
+
+	/** Асфальт дороги, тротуары и площадки, бордюры. */
+	private _buildRoads(): void {
 		this._groundPatch(ROAD_X1, ROAD_X2, ROAD_Z1, ROAD_Z2, 0.004, createYardRoadTexture((ROAD_X2 - ROAD_X1) / 8));
+		this._groundPatch(TURN_X1, ROAD_X2, ROAD_Z2, TURN_Z2, 0.004, createYardRoadTexture(ROAD_WIDTH / 8, (TURN_Z2 - ROAD_Z2) / 5));
+
 		const sidewalk = ['#6a6a6b', '#666667', '#707071', '#636364'];
+		// [x1, x2, z1, z2]
 		for (const [x1, x2, z1, z2] of [
 			[-46, 27, ROAD_Z2 + 1.5, ROAD_Z2 + 3.5], // перед пятиэтажками южнее дороги
 			[-23.5, -21.5, -26, ROAD_Z1], // перед западной
 			[18, 20, -28, ROAD_Z1], // перед восточной
-			[ROAD_X2, 34, ROAD_Z1 - 5, ROAD_Z2 + 5], // площадка перед столовой
+			[TURN_X1 - 2.2, TURN_X1 - 0.4, ROAD_Z2 + 2, TURN_Z2 - 2], // перед домом слева от поворота
+			[ROAD_X2 + 0.4, ROAD_X2 + 3.2, ROAD_Z2 + 1, TURN_Z2 - 7], // перед домом справа от поворота
+			[31, 50, TURN_Z2 - 6, TURN_Z2], // площадка перед столовой
+			[20.5, 28.5, 9.3, 14.2], // площадка под контейнеры
 		] as const) {
 			this._groundPatch(x1, x2, z1, z2, 0.0035, createNoiseTexture(sidewalk, (x2 - x1) / 2, (z2 - z1) / 2, 16, 13));
 		}
+		// Асфальт перед гаражами.
+		this._groundPatch(-50, -37, 10, ROAD_Z1, 0.0038, createYardRoadTexture(13 / 8, 1));
 
-		// Бордюры; на северной стороне — разрыв под дорожку от калитки.
+		// Бордюры: вдоль дороги до поворота и вдоль отрезка после; на севере — разрыв под дорожку от калитки.
 		const curbMat = new THREE.MeshStandardMaterial({ color: '#9d9a92' });
-		for (const [x1, x2, z] of [
-			[ROAD_X1, -1.4, ROAD_Z1],
-			[1.4, ROAD_X2, ROAD_Z1],
-			[ROAD_X1, ROAD_X2, ROAD_Z2],
-		] as const) {
-			const curb = new THREE.Mesh(new THREE.BoxGeometry(x2 - x1, 0.12, 0.22), curbMat);
-			curb.position.set((x1 + x2) / 2, 0.06, z);
-			curb.receiveShadow = true;
-			this.scene.add(curb);
-		}
+		const curb = (x1: number, x2: number, z1: number, z2: number) => {
+			const alongX = Math.abs(x2 - x1) > Math.abs(z2 - z1);
+			const len = alongX ? x2 - x1 : z2 - z1;
+			const mesh = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len : 0.22, 0.12, alongX ? 0.22 : len), curbMat);
+			mesh.position.set((x1 + x2) / 2, 0.06, (z1 + z2) / 2);
+			mesh.receiveShadow = true;
+			this.scene.add(mesh);
+		};
+		curb(ROAD_X1, -1.4, ROAD_Z1, ROAD_Z1);
+		curb(1.4, ROAD_X2, ROAD_Z1, ROAD_Z1);
+		curb(ROAD_X1, TURN_X1, ROAD_Z2, ROAD_Z2);
+		curb(TURN_X1, TURN_X1, ROAD_Z2, TURN_Z2 - 6);
+		curb(ROAD_X2, ROAD_X2, ROAD_Z1, TURN_Z2 - 6);
+	}
 
-		// Пятиэтажки: [центр x, центр z, длина, подъездов, поворот, цвет]. Поворот π — подъезды на север, к дороге.
+	/** Пятиэтажки. Поворот π — подъезды на север, π/2 — на восток, −π/2 — на запад, 0 — на юг. */
+	private _buildPanels(): void {
+		// [центр x, центр z, длина, подъездов, поворот, цвет]
 		const panels: [number, number, number, number, number, string][] = [
-			[-27, 30, 38, 3, Math.PI, '#c9c3b5'],
+			[-27, 30, 38, 3, Math.PI, '#c9c3b5'], // вдоль дороги, южнее
 			[13, 30, 28, 2, Math.PI, '#bdb9ae'],
-			[-30, -6, 40, 3, Math.PI / 2, '#cdbfa8'],
-			[27, -11, 34, 3, -Math.PI / 2, '#c4c0b6'],
+			[-30, -6, 40, 3, Math.PI / 2, '#cdbfa8'], // слева от двора
+			[27, -11, 34, 3, -Math.PI / 2, '#c4c0b6'], // справа от двора
+			[29, 47, 18, 2, Math.PI / 2, '#cbc5b8'], // слева от поворота
+			[53, 36, 30, 3, -Math.PI / 2, '#b8b4aa'], // справа от поворота
+			[-20, 52, 40, 3, Math.PI, '#c6bda9'], // второй ряд за дорогой
+			[54, -2, 26, 2, -Math.PI / 2, '#cfc8ba'], // за восточной
+			[0, -40, 44, 3, 0, '#c2beb4'], // позади большого дома
 		];
 		panels.forEach(([x, z, length, sections, rot, color], i) => {
 			const building = createPanelBuilding(length, sections, color, 17 + i * 31);
@@ -226,13 +282,169 @@ export class Street {
 			const alongX = Math.abs(Math.sin(rot)) < 0.5;
 			this._rectColliders(x, z, alongX ? length : PANEL_BUILDING_DEPTH, alongX ? PANEL_BUILDING_DEPTH : length);
 		});
+	}
 
-		// Столовая в конце дороги, фасадом на запад — к дороге.
-		const canteen = createCanteen();
-		canteen.position.set(CANTEEN_X, 0, (ROAD_Z1 + ROAD_Z2) / 2);
-		canteen.rotation.y = -Math.PI / 2;
-		this.scene.add(canteen);
-		this._rectColliders(CANTEEN_X, (ROAD_Z1 + ROAD_Z2) / 2, CANTEEN_SIZE.depth, CANTEEN_SIZE.width);
+	/** Машины у обочин, фонари и деревья вдоль дороги, скамейки у подъездов, гаражи, контейнеры, киоск. */
+	private _buildDistrictProps(): void {
+		const carCircles: [number, number, number][] = [
+			[0, -1.3, 0.85],
+			[0, 0, 0.85],
+			[0, 1.3, 0.85],
+		];
+		// [x, z, поворот]: π/2 и −π/2 — вдоль основной дороги, 0 и π — вдоль отрезка после поворота.
+		const cars: [number, number, number][] = [
+			[-42, ROAD_Z1 + 1.1, Math.PI / 2],
+			[-20, ROAD_Z1 + 1.1, Math.PI / 2],
+			[-14.5, ROAD_Z1 + 1.1, -Math.PI / 2],
+			[9, ROAD_Z1 + 1.1, Math.PI / 2],
+			[-33, ROAD_Z2 - 1.1, -Math.PI / 2],
+			[4, ROAD_Z2 - 1.1, -Math.PI / 2],
+			[30, ROAD_Z2 - 1.1, Math.PI / 2],
+			[TURN_X1 + 1.1, 28, 0],
+			[TURN_X1 + 1.1, 44, Math.PI],
+			[ROAD_X2 - 1.1, 35, Math.PI],
+			[47.5, TURN_Z2 - 3, -Math.PI / 2],
+		];
+		cars.forEach(([x, z, rot], i) => this._place(createCar(CAR_COLORS[i % CAR_COLORS.length]), x, z, rot + (i % 3) * 0.03, carCircles));
+
+		// Фонари: вдоль северной обочины кронштейном над дорогой, вдоль отрезка после поворота — с западной стороны.
+		for (const x of [-44, -30, -16, 14, 28, 40]) this._place(createLampPost(), x, ROAD_Z1 - 0.7, -Math.PI / 2, [[0, 0, 0.15]]);
+		for (const z of [27, 39, 51]) this._place(createLampPost(), TURN_X1 - 0.6, z, 0, [[0, 0, 0.15]]);
+
+		const trees: [number, number, number, string][] = [
+			[-40, ROAD_Z2 + 0.8, 0.9, '#9c5a2a'],
+			[-22, ROAD_Z2 + 0.8, 1.0, '#a8872f'],
+			[-10, ROAD_Z2 + 0.8, 0.85, '#8a6a3d'],
+			[20, ROAD_Z2 + 0.8, 0.95, '#9c5a2a'],
+			[-4.5, 30, 1.1, '#8a6a3d'],
+			[10, 44, 1.15, '#a8872f'],
+			[18, 52, 1.0, '#9c5a2a'],
+			[47.5, 12.5, 0.9, '#a8872f'],
+			[-44, -2, 1.0, '#8a6a3d'],
+			[40, -10, 1.1, '#9c5a2a'],
+		];
+		for (const [x, z, scale, color] of trees) {
+			this._place(createTree(scale, color), x, z, x * 1.7 + z, [[0, 0, 0.35 * scale]]);
+		}
+		for (const [x, z, s] of [
+			[-46, 23, 1],
+			[26, 23, 0.9],
+			[21, 40, 0.8],
+			[12, 46, 1],
+		] as const) {
+			this._place(createBush(s), x, z, x, [[0, 0, 0.7 * s]]);
+		}
+
+		// Скамейки и урны у подъездов домов за дорогой — спинкой к дому, лицом к дороге.
+		for (const x of [-38, -21, 9.5, 23]) {
+			this._place(createBench(), x, ROAD_Z2 + 2.6, Math.PI, [[0, 0, 0.8]]);
+			this._place(createTrashBin(), x + 1.2, ROAD_Z2 + 2.6, 0, [[0, 0, 0.3]]);
+		}
+		this._place(createBench(), 14, 47.5, 0.4, [[0, 0, 0.8]]);
+
+		// Ряд гаражей в западном конце дороги, воротами к ней.
+		const garageColors = ['#6b5a48', '#56606a', '#7a6a4a', '#5f6b52'];
+		for (let i = 0; i < 4; i++) {
+			this._place(createGarage(garageColors[i]), -48.4 + i * 3.2, 7, 0, [
+				[0, -2, 1.5],
+				[0, 0, 1.5],
+				[0, 2, 1.5],
+			]);
+		}
+
+		this._buildDumpsterSite(24.6, 10.8);
+
+		// Автомат с водой у поворота, лицом к дороге; рядом кто-то оставил пустую бутыль.
+		this._place(createWaterVendingMachine(), ROAD_X2 + 1.9, ROAD_Z1 + 1.5, -Math.PI / 2, [[0, 0, 0.8]]);
+		this._place(createWaterJug(), ROAD_X2 + 1.3, ROAD_Z1 + 0.3, 0);
+
+		for (const [x, z, w, d] of [
+			[-25, 17.2, 2.2, 1.2],
+			[16, 18, 1.6, 1.0],
+			[40.5, 33, 1.8, 1.2],
+		] as const) {
+			this._place(createPuddle(w, d), x, z);
+		}
+	}
+
+	/** Бетонный забор из плит по периметру района со сплошной цепочкой коллайдеров. */
+	private _buildBoundary(): void {
+		const x1 = BOUNDARY_MIN_X;
+		const x2 = BOUNDARY_MAX_X;
+		const z1 = BOUNDARY_MIN_Z;
+		const z2 = BOUNDARY_MAX_Z;
+		for (const [ax, bx, az, bz] of [
+			[x1, x2, z1, z1],
+			[x1, x2, z2, z2],
+			[x1, x1, z1, z2],
+			[x2, x2, z1, z2],
+		] as const) {
+			const length = Math.hypot(bx - ax, bz - az);
+			const alongX = az === bz;
+			// Плита текстурой на длинных гранях; для сторон вдоль Z — тот же бокс, повёрнутый на 90°.
+			const wall = new THREE.Mesh(
+				new THREE.BoxGeometry(length, BOUNDARY_HEIGHT, 0.18),
+				new THREE.MeshStandardMaterial({ map: createConcreteFenceTexture(length / BOUNDARY_PANEL) })
+			);
+			wall.position.set((ax + bx) / 2, BOUNDARY_HEIGHT / 2, (az + bz) / 2);
+			if (!alongX) wall.rotation.y = Math.PI / 2;
+			wall.castShadow = wall.receiveShadow = true;
+			this.scene.add(wall);
+
+			const segments = Math.ceil(length / FENCE_COLLIDER_STEP);
+			for (let i = 0; i <= segments; i++) {
+				const t = i / segments;
+				this.colliders.add(ax + (bx - ax) * t, az + (bz - az) * t, FENCE_COLLIDER_RADIUS);
+			}
+		}
+	}
+
+	/** Контейнерная площадка: навес с тремя открытыми мульдами, полными мусора, и немного мусора на земле перед ней. */
+	private _buildDumpsterSite(cx: number, cz: number): void {
+		const width = 6.4;
+		const depth = 2.2;
+		this._place(createDumpsterShelter(width, depth), cx, cz);
+		// Задняя и боковые стенки навеса — сплошные.
+		for (let x = -width / 2; x <= width / 2 + 0.01; x += 0.5) this.colliders.add(cx + x, cz - depth / 2, 0.25);
+		for (let z = -depth / 2; z <= depth / 2 + 0.01; z += 0.5) {
+			this.colliders.add(cx - width / 2, cz + z, 0.25);
+			this.colliders.add(cx + width / 2, cz + z, 0.25);
+		}
+
+		for (const [dx, color, seed] of [
+			[-1.8, '#3f5a44', 3],
+			[0, '#4a5e6b', 8],
+			[1.8, '#3f5a44', 13],
+		] as const) {
+			this._place(createDumpster(color, seed), cx + dx, cz, (seed % 3) * 0.04 - 0.04, [[0, 0, 0.8]]);
+		}
+
+		// Мусор на земле: пакеты у краёв, коробки, бутылки, бумажки — [dx, dz, поворот].
+		const bags: [number, number, string, number][] = [
+			[-3.6, 1.6, '#1f2022', 1],
+			[-3.1, 2.1, '#3a4a6a', 0.85],
+			[3.7, 1.3, '#262626', 1.1],
+			[1.2, 1.9, '#d8d6cf', 0.8],
+		];
+		for (const [dx, dz, color, scale] of bags) this._place(createTrashBag(color, scale), cx + dx, cz + dz, dx * 2.3);
+		this._place(createCardboardBox(0.6, 0.4, 0.45, true), cx + 2.9, cz + 2.0, 0.5);
+		this._place(createCardboardBox(0.4, 0.25, 0.35), cx - 1.0, cz + 2.3, -0.7);
+		for (const [dx, dz, rot, color] of [
+			[-2.2, 2.6, 0.4, '#3f6a3a'],
+			[0.6, 2.8, 2.1, '#6a4a2a'],
+			[3.3, 2.7, -1.2, '#3f6a3a'],
+		] as const) {
+			this._place(createBottle(color), cx + dx, cz + dz, rot);
+		}
+		for (const [dx, dz, rot, color] of [
+			[-0.4, 1.8, 0.3, '#d9d4c8'],
+			[2.2, 2.6, 1.4, '#c9c2a8'],
+			[-2.8, 2.9, 2.2, '#b8c4c8'],
+			[0.9, 3.4, 0.9, '#d9d4c8'],
+			[-1.6, 3.6, 1.9, '#a8a08a'],
+		] as const) {
+			this._place(createLitterPaper(color, 0.18 + (dx + 3) * 0.02), cx + dx, cz + dz, rot);
+		}
 	}
 
 	/** Коллайдеры по периметру прямоугольного здания (внутрь всё равно не попасть — хватает контура). */
@@ -377,7 +589,6 @@ export class Street {
 		];
 		for (const [x, z, scale, color] of trees) {
 			this._place(createTree(scale, color), x, z, x * 1.7 + z, [[0, 0, 0.35 * scale]]);
-			this._place(createLeafLitter(2.2 * scale, color), x + 0.4, z - 0.3);
 		}
 
 		for (const [x, z, s] of [
