@@ -30,10 +30,12 @@ const WALL_MARGIN = 0.4;
 const PIXEL_SIZE = 4;
 /** С какого расстояния до двери появляется подсказка E. */
 const DOOR_REACH = 2.2;
+/** Ближе этого к красной двери столовой (после боя) — переход на арену сам, без E. */
+const RED_DOOR_REACH = 1.6;
 /** Затемнение при переходе между местами (тёмно-багровое): скрывает смену сцены. Мягкое, не резкое. */
 const FLASH_IN = 0.35;
-const FLASH_HOLD = 0.15;
-const FLASH_OUT = 0.6;
+const FLASH_HOLD = 0.3;
+const FLASH_OUT = 1.4;
 const FLASH_COLOR = '#5c0b14';
 /** Высота «голоса» при печати реплик, Гц. */
 const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, player: 170 };
@@ -42,14 +44,14 @@ const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
 const DEBUG_START_AT_CANTEEN = true;
 /** Отладка: начинать сразу на арене (ад) — с обрезом в руках. */
-const DEBUG_START_AT_ARENA = true;
+const DEBUG_START_AT_ARENA = false;
 /** Дальность прорисовки камеры: в помещениях и на улице хватает 100 м, на арене видны горы и небо вдали. */
 const CAMERA_FAR = 100;
 const ARENA_CAMERA_FAR = 600;
 /** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
 const DEBUG_SKIP_INTRO = true;
 /** Отладка: начинать с обрезом в руках (иначе он убран до конца побега в столовой). ЛКМ — дуплет (после него
- * сама перезарядка), R — перезарядка, T — убрать/достать (T работает всегда). */
+ * сама перезарядка), R — перезарядка. Достаёт его только катсцена побега в столовой. */
 const DEBUG_SHOTGUN = false;
 /** Обрез в руках — в координатах камеры: справа внизу, дулом чуть к центру экрана. */
 const SHOTGUN_HELD_POSITION = new THREE.Vector3(0.16, -0.17, -0.42);
@@ -65,11 +67,19 @@ const ZOMBIE_ANGRY_DISTANCE = 3;
 const PELLETS = 18;
 const PELLET_SPREAD = 0.06;
 const PELLET_RANGE = 40;
-/** Урон: столько ударов — смерть; через столько секунд без ударов здоровье восстанавливается полностью. */
+/** На арене дробь летит дальше: голова босса огромная и далеко, за обрывом. */
+const ARENA_PELLET_RANGE = 120;
+/** Урон: столько ударов — смерть; через столько секунд без ударов здоровье начинает восстанавливаться. */
 const PLAYER_HITS = 6;
-const REGEN_DELAY = 3;
+const REGEN_DELAY = 4;
+/** После REGEN_DELAY здоровье возвращается постепенно: по одному удару за столько секунд. */
+const REGEN_STEP = 0.5;
 /** Зомби попадает, если игрок в момент удара не дальше этого, м. */
 const ZOMBIE_HIT_RANGE = 1.6;
+/** Огненный шар босса отнимает столько «ударов» из PLAYER_HITS. */
+const FIREBALL_DAMAGE = 2;
+/** Босс убит — музыка арены затихает за столько секунд. */
+const BOSS_MUSIC_FADE = 6;
 /** Не чаще одного стона зомби за столько секунд — на всех. */
 const GROAN_GAP = 0.35;
 /** Сбой картинки и звука (глитч в реплике): сколько длится, с. */
@@ -250,6 +260,21 @@ export class Game {
 		this.canteen.onDrawWeapon = () => {
 			if (this.shotgun.holstered) this.shotgun.toggleHolster();
 		};
+		// Катсцена босса арены: кинорамка сразу (реплика в конце — в ней же), тряска, рёв.
+		this.arena.onCutsceneStart = () => this.letterbox.show();
+		this.arena.onShake = (strength) => this.player.shake(strength);
+		this.arena.onBossDeath = () => this.arenaMusic.fadeOut(BOSS_MUSIC_FADE);
+		this.arena.onCutsceneEnd = () => this.letterbox.hide();
+		this.arena.onBossRoar = () => this.sfx.bossRoar('roar');
+		// Атака босса: рык перед плевком, свист шара, взрыв (задел — урон).
+		this.arena.boss.onSpit = () => this.sfx.bossRoar('spit');
+		this.arena.boss.onFireballLaunch = () => this.sfx.fireball();
+		this.arena.boss.onExplode = (hitPlayer) => {
+			this.sfx.explosion(hitPlayer ? 1 : 0.5);
+			if (hitPlayer) this._hurtPlayer(FIREBALL_DAMAGE);
+			else this.player.shake(0.3);
+		};
+		this.arena.onDialogue = (dialogue) => this._startDialogue(dialogue);
 
 		// Автоплей звука запрещён без жеста пользователя — запускаем звук на первый клик/клавишу (обычно ещё
 		// на стартовом экране). Если игра началась не в офисе — сразу и уличное (дождь, ударные): до жеста их нельзя
@@ -311,7 +336,11 @@ export class Game {
 
 		// Во время разговора стоим на месте; движение мыши сбрасываем, чтобы после не было рывка взгляда.
 		if (this.dialogue.active || this.introPending) this.input.consumeMouseDelta();
-		else this.player.update(dt);
+		else if (this.place === 'arena' && this.arena.cutsceneActive) {
+			// Катсцена босса: управления нет, взгляд сам поворачивается к голове.
+			this.input.consumeMouseDelta();
+			this.player.lookToward(this.arena.cutsceneLook, dt);
+		} else this.player.update(dt);
 		this.dialogue.update(dt);
 		this.room.update(dt);
 		if (this.place === 'arena') this.arena.update(dt, this.camera.position);
@@ -348,14 +377,13 @@ export class Game {
 			SHOTGUN_HELD_POSITION.z
 		);
 		const canteenBusy = this.place === 'canteen' && (this.canteen.eating || this.canteen.cutsceneActive);
-		const canUse = !this.dialogue.active && !this.introPending && this.flashTime === null && !canteenBusy;
-		// Перекрестие — когда из обреза можно стрелять (и мышь захвачена: без неё взгляд не наводится).
-		if (canUse && this.input.consumePress('KeyT')) this.shotgun.toggleHolster();
+		const arenaBusy = this.place === 'arena' && this.arena.cutsceneActive;
+		const canUse = !this.dialogue.active && !this.introPending && this.flashTime === null && !canteenBusy && !arenaBusy;
 		// Перекрестие — только с обрезом в руках (убран или в движении — нет).
 		const crosshairShown = canUse && this.input.isPointerLocked && !this.shotgun.holstered;
 		this.crosshair.style.display = crosshairShown ? 'block' : 'none';
 		// Прицел на живом зомби (и он не за препятствием) — перекрестие красное.
-		this.crosshair.classList.toggle('enemy', crosshairShown && this._aimedZombie(scene) !== null);
+		this.crosshair.classList.toggle('enemy', crosshairShown && (this._aimedZombie(scene) !== null || this._aimedBoss(scene)));
 		if (canUse && this.input.consumePress('Mouse0') && this.shotgun.fire()) {
 			this.player.shake();
 			this._shoot(scene);
@@ -387,6 +415,14 @@ export class Game {
 		return (hit && alive.find((z) => z.owns(hit.object))) ?? null;
 	}
 
+	/** Под прицелом — живой босс арены в бою (не закрытый препятствием). */
+	private _aimedBoss(scene: THREE.Scene): boolean {
+		const { boss } = this.arena;
+		if (this.place !== 'arena' || !boss.alive || !boss.fighting) return false;
+		const hit = this._aimRay(scene, ARENA_PELLET_RANGE);
+		return !!hit && boss.owns(hit.object);
+	}
+
 	/** Зомби места — в общий список врагов (прежние этого места, если были, — убираем: после перезапуска боя они новые). */
 	private _registerZombies(place: Place, zombies: Zombie[]): void {
 		for (let i = this.zombies.length - 1; i >= 0; i--) if (this.zombies[i].place === place) this.zombies.splice(i, 1);
@@ -402,7 +438,13 @@ export class Game {
 		if (this.flashTime !== null || !zombie.alive) return;
 		const distance = Math.hypot(zombie.group.position.x - this.camera.position.x, zombie.group.position.z - this.camera.position.z);
 		if (distance > ZOMBIE_HIT_RANGE) return;
-		this.hurt++;
+		this._hurtPlayer(1);
+	}
+
+	/** Игрока ранило (hits ударов): вспышка виньетки, тряска, звук; набралось PLAYER_HITS — смерть. */
+	private _hurtPlayer(hits: number): void {
+		if (this.flashTime !== null) return;
+		this.hurt = Math.min(PLAYER_HITS, this.hurt + hits);
 		this.sinceHurt = 0;
 		this.hurtPulse = 1;
 		this.player.shake(0.7);
@@ -416,11 +458,14 @@ export class Game {
 
 	/**
 	 * Урон на экране — только виньетка: краснеет от краёв тем сильнее, чем больше ударов, и вспыхивает в момент удара.
-	 * REGEN_DELAY без ударов — здоровье полностью восстанавливается (виньетка плавно гаснет).
+	 * REGEN_DELAY без ударов — здоровье начинает восстанавливаться, по удару за REGEN_STEP (виньетка плавно гаснет).
 	 */
 	private _updateHurt(dt: number): void {
 		this.sinceHurt += dt;
-		if (this.hurt > 0 && this.sinceHurt >= REGEN_DELAY && !this.respawning) this.hurt = 0;
+		if (this.hurt > 0 && this.sinceHurt >= REGEN_DELAY + REGEN_STEP && !this.respawning) {
+			this.hurt--;
+			this.sinceHurt = REGEN_DELAY;
+		}
 		this.hurtPulse = Math.max(0, this.hurtPulse - dt * 2.5);
 		const target = this.hurt / PLAYER_HITS;
 		this.vignetteShown += (target - this.vignetteShown) * (1 - Math.exp(-dt * (target > this.vignetteShown ? 12 : 2)));
@@ -453,10 +498,16 @@ export class Game {
 	private _shoot(scene: THREE.Scene): void {
 		const origin = this.camera.getWorldPosition(new THREE.Vector3());
 		const forward = this.camera.getWorldDirection(new THREE.Vector3());
-		const hit = this._aimRay(scene, PELLET_RANGE);
+		const range = this.place === 'arena' ? ARENA_PELLET_RANGE : PELLET_RANGE;
+		const hit = this._aimRay(scene, range);
 		// По зомби и его останкам следов нет — там кровь (иначе щербинки повисли бы в воздухе вокруг тела).
-		// Проверяем до hit: после разрыва куски уже не внутри group зомби.
-		const onZombie = hit && this.zombies.some(({ zombie }) => zombie.owns(hit.object));
+		// Проверяем до hit: после разрыва куски уже не внутри group зомби. Голова босса движется — на ней тоже без следов.
+		const onBoss = !!hit && this.place === 'arena' && this.arena.boss.owns(hit.object);
+		const onZombie = (hit && this.zombies.some(({ zombie }) => zombie.owns(hit.object))) || onBoss;
+		if (hit && onBoss && this.arena.boss.fighting) {
+			this.sfx.gore();
+			this.sfx.bossRoar(this.arena.boss.hit(hit.point, forward) ? 'dying' : 'hurt');
+		}
 		const target = hit && this.zombies.find(({ place, zombie }) => place === this.place && zombie.alive && zombie.owns(hit.object));
 		if (hit && target) {
 			target.zombie.hit(hit.point, forward);
@@ -487,10 +538,10 @@ export class Game {
 			const a = Math.random() * Math.PI * 2;
 			ray.set(origin, forward.clone().addScaledVector(right, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r).normalize());
 			const point = new THREE.Vector3();
-			const onPlane = plane && ray.intersectPlane(plane, point) && point.distanceTo(origin) <= PELLET_RANGE;
+			const onPlane = plane && ray.intersectPlane(plane, point) && point.distanceTo(origin) <= range;
 			if (onPlane) ends.push({ point, normal: plane!.normal });
 			else if (hit && onZombie) ends.push({ point: ray.at(hit.distance, point), normal: null });
-			else ends.push({ point: ray.at(PELLET_RANGE, point), normal: null });
+			else ends.push({ point: ray.at(range, point), normal: null });
 		}
 		this.impacts.shot(scene, this.shotgun.muzzle(new THREE.Vector3()), ends);
 	}
@@ -575,6 +626,13 @@ export class Game {
 				if (bites === MUSIC_FADE_BITE) this.music.fadeOut(MUSIC_FADE_TIME);
 			}
 			return;
+		}
+		// Красная дверь столовой: после боя подошёл вплотную — сам переход в ад.
+		if (this.place === 'canteen' && this.flashTime === null && this.canteen.redDoorOpen) {
+			const { redDoor } = this.canteen;
+			if (Math.hypot(this.camera.position.x - redDoor.x, this.camera.position.z - redDoor.z) < RED_DOOR_REACH) {
+				this._beginTransition('arena');
+			}
 		}
 		const action = this.flashTime === null ? this._nearbyInteraction() : null;
 		if (!action) {
@@ -698,7 +756,9 @@ export class Game {
 		} else if (t < FLASH_IN + FLASH_HOLD) {
 			opacity = 1;
 		} else if (t < FLASH_IN + FLASH_HOLD + FLASH_OUT) {
-			opacity = 1 - (t - FLASH_IN - FLASH_HOLD) / FLASH_OUT;
+			// Выход — плавный: сначала гаснет медленно, в середине быстрее, к концу снова мягко.
+			const k = (t - FLASH_IN - FLASH_HOLD) / FLASH_OUT;
+			opacity = 1 - k * k * (3 - 2 * k);
 		} else {
 			opacity = 0;
 			this.flashTime = null;
@@ -715,8 +775,12 @@ export class Game {
 			this.vignetteShown = 0;
 			this.hurtPulse = 0;
 			if (this.place === 'arena') {
-				this.arena.restartFight();
-				this._registerZombies('arena', this.arena.zombies);
+				// Убил босс — заново с начала его катсцены (зомби остаются перебитыми), иначе — весь бой.
+				if (this.arena.bossStarted) this.arena.restartBoss();
+				else {
+					this.arena.restartFight();
+					this._registerZombies('arena', this.arena.zombies);
+				}
 				const { spawnPoint } = this.arena;
 				this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
 				return;
@@ -729,6 +793,20 @@ export class Game {
 		}
 		const from = this.place;
 		this.place = this.destination;
+		if (this.place === 'arena') {
+			// В ад: бой с начала, свои коллайдеры; дождь, жуткий фон и лаунж смолкают — играет метал.
+			this.player.colliders = this.arenaColliders;
+			this.arena.restartFight();
+			this._registerZombies('arena', this.arena.zombies);
+			const { spawnPoint } = this.arena;
+			this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
+			this.rainSound.stop();
+			this.dreadAmbient.stop();
+			this.music.stop();
+			this.music.setPercussion(false);
+			this.arenaMusic.start();
+			return;
+		}
 		if (this.place === 'canteen') {
 			this.player.colliders = this.canteenColliders;
 			const { spawnPoint } = this.canteen;

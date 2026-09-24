@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
 import { Zombie } from './People.js';
+import { DogBoss, AGONY_TIME, SINK_TIME, createGlowTexture } from './DogBoss.js';
+import { PLAYER_NAME, type Dialogue } from '../core/Interaction.js';
 
 /**
  * Арена — ад, как в Doom: круглая площадка из потрескавшейся тёмно-красной породы с раскалёнными трещинами.
@@ -28,6 +30,57 @@ const EMBER_HEIGHT = 18;
 const ZOMBIE_COUNT = 15;
 const ZOMBIE_MIN_DISTANCE = 12;
 const ZOMBIE_SPEED: [number, number] = [1.0, 1.7];
+/** Босс: где стоит шея — за краем обрыва в открытом секторе (спереди от места появления). */
+const BOSS_Z = -40;
+/**
+ * Катсцена босса (с): через BOSS_DELAY после последнего убитого зомби управление отбирают; камера поворачивается
+ * к открытому краю, через BOSS_RISE_AT голова выныривает (земля трясётся), в BOSS_ROAR_AT ревёт,
+ * в BOSS_LINE_AT — реплика героя; когда она закроется — управление обратно, бой.
+ */
+const BOSS_DELAY = 2;
+const BOSS_RISE_AT = 1.2;
+const BOSS_ROAR_AT = 3.6;
+const BOSS_LINE_AT = 6.4;
+/** Катсцена смерти босса: пока он бьётся в агонии и уходит под обрыв, и ещё немного после. */
+const BOSS_DEATH_CUTSCENE = AGONY_TIME + SINK_TIME + 1;
+/** Портал после победы: у края обрыва в открытом секторе, центр на высоте PORTAL_Y; радиус кольца; за сколько секунд раскрывается. */
+const PORTAL_Z = -(ARENA_RADIUS - 2.5);
+const PORTAL_Y = 2.8;
+const PORTAL_RADIUS = 2.4;
+const PORTAL_OPEN_TIME = 1.2;
+
+/** Воронка портала: бледно-голубые спиральные рукава к белому центру (прозрачное — по краю). */
+function createPortalTexture(): THREE.CanvasTexture {
+	const size = 64;
+	const canvas = document.createElement('canvas');
+	canvas.width = canvas.height = size;
+	const ctx = canvas.getContext('2d')!;
+	const image = ctx.createImageData(size, size);
+	for (let y = 0; y < size; y++) {
+		for (let x = 0; x < size; x++) {
+			const dx = (x + 0.5) / size - 0.5;
+			const dy = (y + 0.5) / size - 0.5;
+			const r = Math.hypot(dx, dy) * 2;
+			const i = (y * size + x) * 4;
+			if (r > 1) continue;
+			// Спираль: угол закручивается с радиусом, три рукава.
+			const arm = 0.5 + 0.5 * Math.sin(Math.atan2(dy, dx) * 3 + r * 9);
+			const v = Math.min(1, (1 - r) * 1.6 + arm * 0.45);
+			image.data[i] = 150 + 105 * v;
+			image.data[i + 1] = 200 + 55 * v;
+			image.data[i + 2] = 255;
+			image.data[i + 3] = 255 * Math.min(1, v * (1 - r * r) * 1.4);
+		}
+	}
+	ctx.putImageData(image, 0, 0);
+	const texture = new THREE.CanvasTexture(canvas);
+	texture.magFilter = THREE.NearestFilter;
+	texture.minFilter = THREE.NearestFilter;
+	texture.colorSpace = THREE.SRGBColorSpace;
+	return texture;
+}
+/** Пока голова ещё под обрывом, камера смотрит сюда по высоте (м) — на край, откуда она вынырнет. */
+const BOSS_LOOK_MIN_Y = 3;
 
 /** Детерминированный генератор случайных чисел — арена одинаковая при каждом запуске. */
 function random(seed: number): () => number {
@@ -150,6 +203,31 @@ export class Arena {
 	private time = 0;
 	/** Зомби арены — сразу охотятся на игрока; Game регистрирует их как врагов. */
 	readonly zombies: Zombie[] = [];
+	/** Босс — голова адского пса; выныривает, когда перебиты все зомби. */
+	readonly boss = new DogBoss(0, BOSS_Z);
+	/** Время от гибели последнего зомби, с; null — зомби ещё живы (или бой заново). */
+	private bossTimer: number | null = null;
+	/** Реплика героя прозвучала и закрыта — идёт бой с боссом. */
+	private bossFight = false;
+	/** Время с гибели босса, с (катсцена смерти); null — жив. */
+	private bossDeathTime: number | null = null;
+	/** Портал домой: появляется после катсцены смерти босса. */
+	private readonly portal = new THREE.Group();
+	private readonly portalSwirl: THREE.Mesh;
+	private readonly portalGlow: THREE.Sprite;
+	private readonly portalCore: THREE.Sprite;
+	private readonly portalFloor: THREE.Mesh;
+	/** Время с появления портала, с; null — его нет. */
+	private portalTime: number | null = null;
+	/** Катсцена: тряхнуть камеру (strength 0..1), зарычать, начать реплику. Звук и камеру делает Game. */
+	onShake: ((strength: number) => void) | null = null;
+	onBossRoar: (() => void) | null = null;
+	onDialogue: ((dialogue: Dialogue) => void) | null = null;
+	/** Катсцена началась — Game выдвигает кинорамку. */
+	onCutsceneStart: (() => void) | null = null;
+	/** Босс убит — Game глушит музыку; катсцена смерти кончилась — убирает кинорамку. */
+	onBossDeath: (() => void) | null = null;
+	onCutsceneEnd: (() => void) | null = null;
 
 	constructor(private readonly colliders: CircleColliders) {
 		this.scene.background = SKY_HORIZON.clone();
@@ -176,14 +254,99 @@ export class Arena {
 		this.embers = points;
 		this.emberSpeed = speed;
 		this.scene.add(points);
+		this.scene.add(this.boss.group, this.boss.effects);
+		// Портал: светящееся кольцо, в нём крутится воронка, вокруг — сияние. Холодный свет — чужой в аду.
+		this.portal.position.set(0, PORTAL_Y, PORTAL_Z);
+		const ring = new THREE.Mesh(
+			new THREE.TorusGeometry(PORTAL_RADIUS, 0.18, 6, 32),
+			new THREE.MeshBasicMaterial({ color: '#dff4ff', fog: false })
+		);
+		this.portalSwirl = new THREE.Mesh(
+			new THREE.CircleGeometry(PORTAL_RADIUS, 24),
+			new THREE.MeshBasicMaterial({
+				map: createPortalTexture(),
+				transparent: true,
+				side: THREE.DoubleSide,
+				depthWrite: false,
+				fog: false,
+			})
+		);
+		const glowTexture = createGlowTexture();
+		this.portalGlow = new THREE.Sprite(
+			new THREE.SpriteMaterial({
+				map: glowTexture,
+				color: '#8fd8ff',
+				blending: THREE.AdditiveBlending,
+				depthWrite: false,
+				transparent: true,
+				fog: false,
+			})
+		);
+		// Ядро: яркое белое сияние поверх воронки.
+		this.portalCore = new THREE.Sprite(
+			new THREE.SpriteMaterial({
+				map: glowTexture,
+				color: '#ffffff',
+				blending: THREE.AdditiveBlending,
+				depthWrite: false,
+				transparent: true,
+				fog: false,
+			})
+		);
+		// Отсвет на полу под порталом.
+		this.portalFloor = new THREE.Mesh(
+			new THREE.PlaneGeometry(1, 1),
+			new THREE.MeshBasicMaterial({
+				map: glowTexture,
+				color: '#7fd0ff',
+				blending: THREE.AdditiveBlending,
+				depthWrite: false,
+				transparent: true,
+				fog: false,
+			})
+		);
+		this.portalFloor.rotation.x = -Math.PI / 2;
+		this.portalFloor.position.y = -PORTAL_Y + 0.03;
+		this.portal.add(ring, this.portalSwirl, this.portalGlow, this.portalCore, this.portalFloor);
+		this.portal.visible = false;
+		this.scene.add(this.portal);
 		this.restartFight();
 	}
 
-	/** Задача: перебить всех. */
+	/** Задача: перебить всех, потом — босса. */
 	get objective(): { text: string; at: THREE.Vector3 | null } | null {
 		const killed = this.zombies.filter((zombie) => !zombie.alive).length;
-		if (killed >= this.zombies.length) return null;
-		return { text: `Убей всех (${killed}/${this.zombies.length})`, at: null };
+		if (killed < this.zombies.length) return { text: `Убей всех (${killed}/${this.zombies.length})`, at: null };
+		if (this.bossFight && this.boss.alive) return { text: 'УБЕЙ', at: null };
+		if (this.portalTime !== null) return { text: 'ПРОСНИСЬ', at: new THREE.Vector3(0, PORTAL_Y + PORTAL_RADIUS + 0.4, PORTAL_Z) };
+		return null;
+	}
+
+	/** Зомби перебиты — дальше дело с боссом (смерть — заново с его катсцены). */
+	get bossStarted(): boolean {
+		return this.bossTimer !== null;
+	}
+
+	/** Бой с боссом заново: голова снова под лавой, катсцена — с начала (без паузы после зомби). */
+	restartBoss(): void {
+		this.boss.reset();
+		this.bossFight = false;
+		this.bossDeathTime = null;
+		this._hidePortal();
+		this.bossTimer = BOSS_DELAY - 0.001;
+	}
+
+	/** Катсцена босса идёт — управления нет (реплика в конце — уже обычный диалог, он и так держит на месте). */
+	get cutsceneActive(): boolean {
+		if (this.bossDeathTime !== null) return this.bossDeathTime < BOSS_DEATH_CUTSCENE;
+		return this.bossTimer !== null && this.bossTimer >= BOSS_DELAY && this.bossTimer < BOSS_DELAY + BOSS_LINE_AT;
+	}
+
+	/** Куда смотрит камера в катсцене: на голову, а пока она под обрывом — на край, откуда вынырнет. */
+	get cutsceneLook(): THREE.Vector3 {
+		const center = this.boss.center;
+		center.y = Math.max(center.y, BOSS_LOOK_MIN_Y);
+		return center;
 	}
 
 	/**
@@ -192,6 +355,11 @@ export class Arena {
 	 * заново регистрирует zombies.
 	 */
 	restartFight(): void {
+		this.boss.reset();
+		this.bossTimer = null;
+		this.bossDeathTime = null;
+		this._hidePortal();
+		this.bossFight = false;
 		for (const zombie of this.zombies) zombie.dispose();
 		this.zombies.length = 0;
 		const { x: sx, z: sz } = this.spawnPoint;
@@ -230,6 +398,11 @@ export class Arena {
 	update(dt: number, player: THREE.Vector3): void {
 		this.time += dt;
 		for (const zombie of this.zombies) zombie.target?.set(player.x, 0, player.z);
+		this._updateBossIntro(dt);
+		this._updateBossDeath(dt);
+		this._updatePortal(dt);
+		this.boss.attacking = this.bossFight;
+		this.boss.update(dt, player);
 		this.lavaTexture.offset.set(this.time * 0.01, this.time * 0.006);
 		const pos = this.embers.geometry.attributes.position as THREE.BufferAttribute;
 		for (let i = 0; i < pos.count; i++) {
@@ -246,6 +419,79 @@ export class Arena {
 			pos.setX(i, pos.getX(i) + Math.sin(this.time * 1.3 + i) * dt * 0.3);
 		}
 		pos.needsUpdate = true;
+	}
+
+	/** Катсцена босса по таймеру (см. BOSS_*): отсчёт — с гибели последнего зомби. */
+	private _updateBossIntro(dt: number): void {
+		if (this.bossTimer === null) {
+			if (this.zombies.length > 0 && this.zombies.every((zombie) => !zombie.alive)) this.bossTimer = 0;
+			return;
+		}
+		const before = this.bossTimer - BOSS_DELAY;
+		this.bossTimer += dt;
+		const t = this.bossTimer - BOSS_DELAY;
+		const crossed = (at: number) => before < at && t >= at;
+		if (crossed(0)) this.onCutsceneStart?.();
+		if (crossed(BOSS_RISE_AT)) this.boss.rise();
+		// Пока выныривает — земля дрожит, сильнее к концу подъёма.
+		if (t >= BOSS_RISE_AT && t < BOSS_ROAR_AT) this.onShake?.(0.25 + 0.35 * ((t - BOSS_RISE_AT) / (BOSS_ROAR_AT - BOSS_RISE_AT)));
+		if (crossed(BOSS_ROAR_AT)) {
+			this.boss.roar();
+			this.onBossRoar?.();
+		}
+		if (t >= BOSS_ROAR_AT && t < BOSS_ROAR_AT + 2.2) this.onShake?.(0.8);
+		if (crossed(BOSS_LINE_AT)) {
+			this.onDialogue?.({
+				lines: [{ speaker: PLAYER_NAME, text: 'Пора с этим покончить.', voice: 'player' }],
+				onEnd: () => (this.bossFight = true),
+			});
+		}
+	}
+
+	/**
+	 * Катсцена смерти босса: управление забирают, камера следит за головой (агония, потом уходит под обрыв),
+	 * земля трясётся — в агонии сильно, потом затихает; музыка стихает. В конце — управление обратно.
+	 */
+	private _updateBossDeath(dt: number): void {
+		if (this.bossDeathTime === null) {
+			if (!this.bossFight || this.boss.alive) return;
+			this.bossDeathTime = 0;
+			this.onCutsceneStart?.();
+			this.onBossDeath?.();
+			return;
+		}
+		if (this.bossDeathTime >= BOSS_DEATH_CUTSCENE) return;
+		this.bossDeathTime += dt;
+		const t = this.bossDeathTime;
+		if (t < AGONY_TIME) this.onShake?.(0.7);
+		else if (t < AGONY_TIME + SINK_TIME) this.onShake?.(0.5 * (1 - (t - AGONY_TIME) / SINK_TIME) + 0.1);
+		if (t >= BOSS_DEATH_CUTSCENE) {
+			this.onCutsceneEnd?.();
+			this.portalTime = 0;
+			this.portal.visible = true;
+		}
+	}
+
+	/** Портал раскрывается из точки (с перелётом), воронка крутится, сияние дышит. */
+	private _updatePortal(dt: number): void {
+		if (this.portalTime === null) return;
+		this.portalTime += dt;
+		const k = Math.min(1, this.portalTime / PORTAL_OPEN_TIME);
+		const c = 1.7;
+		const open = 1 + (c + 1) * (k - 1) ** 3 + c * (k - 1) ** 2;
+		this.portal.scale.setScalar(Math.max(0.001, open));
+		this.portalSwirl.rotation.z -= dt * 2.2;
+		// Сияние дышит: внешнее — широкое голубое, ядро — белое, мерцает чаще; на полу — пятно света.
+		const breathe = Math.sin(this.time * 2.3);
+		this.portalGlow.scale.setScalar(PORTAL_RADIUS * (8 + breathe * 0.8));
+		this.portalCore.scale.setScalar(PORTAL_RADIUS * (2.6 + Math.sin(this.time * 5.1) * 0.25));
+		this.portalCore.material.opacity = 0.75 + Math.sin(this.time * 7.3) * 0.15;
+		this.portalFloor.scale.setScalar(PORTAL_RADIUS * (6 + breathe * 0.5));
+	}
+
+	private _hidePortal(): void {
+		this.portalTime = null;
+		this.portal.visible = false;
 	}
 
 	/** Небо: сфера с градиентом по высоте — у горизонта светло-оранжевое, выше красное, в зените багровое. */

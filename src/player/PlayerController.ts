@@ -25,6 +25,8 @@ const SHAKE_JITTER = 0.012;
 const SHAKE_TIME = 0.35;
 /** Как быстро покачивание нарастает, когда пошёл, и затихает, когда встал (1/с). */
 const BOB_BLEND = 8;
+/** Как быстро взгляд доворачивается к цели в катсцене (1/с). */
+const LOOK_TURN = 3;
 
 export interface Ground {
 	getHeightAt(x: number, z: number): number;
@@ -88,6 +90,28 @@ export class PlayerController {
 		this.camera.position.set(x, y, z);
 		this.yaw = yaw;
 		this.pitch = pitch;
+		this._applyRotation();
+	}
+
+	/**
+	 * Катсцена на ногах: стоим на месте (на земле), взгляд плавно поворачивается к точке target; мышь и ходьба
+	 * не работают, тряска затихает как обычно. После — управление продолжается с того взгляда, где остановились.
+	 */
+	lookToward(target: THREE.Vector3, dt: number): void {
+		this.shakeAmount = Math.max(0, this.shakeAmount - dt / SHAKE_TIME);
+		this.bobWeight += (0 - this.bobWeight) * (1 - Math.exp(-dt * BOB_BLEND));
+		const pos = this.camera.position;
+		pos.y = this._groundEyeY();
+		this.velocityY = 0;
+		this.grounded = true;
+		const dx = target.x - pos.x;
+		const dz = target.z - pos.z;
+		const yaw = Math.atan2(-dx, -dz);
+		const pitch = THREE.MathUtils.clamp(Math.atan2(target.y - pos.y, Math.hypot(dx, dz)), -MAX_PITCH, MAX_PITCH);
+		// Поворот — по кратчайшей дуге.
+		const k = 1 - Math.exp(-dt * LOOK_TURN);
+		this.yaw += (THREE.MathUtils.euclideanModulo(yaw - this.yaw + Math.PI, Math.PI * 2) - Math.PI) * k;
+		this.pitch += (pitch - this.pitch) * k;
 		this._applyRotation();
 	}
 

@@ -99,6 +99,17 @@ export class ArenaMusic {
 		this.timer = window.setInterval(() => this._schedule(), TICK_MS);
 	}
 
+	/** Плавно затихнуть за seconds и остановиться (start — снова с полной громкостью). */
+	fadeOut(seconds: number): void {
+		if (!this.ctx || !this.master || this.timer === null) return;
+		const gain = this.master.gain;
+		const t = this.ctx.currentTime;
+		gain.cancelScheduledValues(t);
+		gain.setValueAtTime(gain.value, t);
+		gain.linearRampToValueAtTime(0.0001, t + seconds);
+		window.setTimeout(() => this.stop(), seconds * 1000);
+	}
+
 	stop(): void {
 		if (this.timer !== null) window.clearInterval(this.timer);
 		this.timer = null;

@@ -67,6 +67,11 @@ export class RainSound {
 	}
 
 	/** В помещении дождь плавно стихает до нуля, на улице — плавно возвращается. */
+	/** Заглушить насовсем (в аду дождя нет). */
+	stop(): void {
+		void this.ctx?.suspend();
+	}
+
 	setIndoor(indoor: boolean): void {
 		if (indoor === this.indoor) return;
 		this.indoor = indoor;

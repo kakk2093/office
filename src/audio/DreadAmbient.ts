@@ -19,6 +19,11 @@ export class DreadAmbient {
 	private events: GainNode | null = null;
 	private playing = false;
 
+	/** Заглушить насовсем (ушли в другое место): звук просто останавливается. */
+	stop(): void {
+		void this.ctx?.suspend();
+	}
+
 	start(): void {
 		if (this.playing) return;
 		this.playing = true;

@@ -429,10 +429,18 @@ export class Canteen {
 	 * Текущий шаг цепочки — первое, что ещё не сделано: текст задачи и точка над предметом для маркера HUD.
 	 * null — задачи нет (например, идёт катсцена).
 	 */
+	/** Зомби перебиты — красная дверь ведёт дальше (подошёл вплотную — переход на арену). */
+	get redDoorOpen(): boolean {
+		return this.escaped && this.zombies.every((zombie) => !zombie.alive);
+	}
+
+	/** Красная дверь за раздачей: середина проёма на полу. */
+	readonly redDoor = { x: KITCHEN_DOOR_X, z: NORTH_Z };
+
 	get objective(): { text: string; at: THREE.Vector3 | null } | null {
 		const at = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
 		// После побега — перебить зомби (без маркеров: они и так идут на тебя), потом — к красной двери за раздачей.
-		// TODO: у красной двери пока ничего не происходит (и зайти за неё нельзя: не пускает граница зала).
+		// У красной двери переход срабатывает сам (см. Game: redDoorOpen и redDoor).
 		if (this.escaped) {
 			const killed = this.zombies.filter((zombie) => !zombie.alive).length;
 			if (killed < this.zombies.length) return { text: `Убей всех (${killed}/${this.zombies.length})`, at: null };

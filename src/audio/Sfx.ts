@@ -866,6 +866,211 @@ export class Sfx {
 		raspLfo.stop(t + duration + 0.05);
 	}
 
+	/**
+	 * Рёв огромного адского пса: очень низкий хриплый голос — несколько расстроенных пил (биения) через «гласную»
+	 * «ррааа», с хрипом (амплитуда дёргается ~20 Гц) и перегрузом; под ним — гул на границе слышимости, поверх —
+	 * рычащий шум и визг, сползающий вниз. Громко, через компрессор. roar — долгий рёв; dying — предсмертный:
+	 * короче, тон падает; hurt — короткий взвизг от попадания; spit — короткий рык перед плевком.
+	 */
+	bossRoar(kind: 'roar' | 'dying' | 'hurt' | 'spit'): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+		const dying = kind === 'dying' || kind === 'hurt';
+		const duration = { roar: 3.2, dying: 3.5, hurt: 0.7, spit: 0.9 }[kind];
+		const f0 = { roar: 52, dying: 62, hurt: 85, spit: 48 }[kind];
+
+		const comp = ctx.createDynamicsCompressor();
+		comp.threshold.value = -14;
+		comp.ratio.value = 8;
+		comp.attack.value = 0.005;
+		comp.release.value = 0.3;
+		const master = ctx.createGain();
+		master.gain.value = 0.5;
+		comp.connect(master);
+		master.connect(ctx.destination);
+
+		// Перегруз — рёв «рвётся».
+		const drive = ctx.createWaveShaper();
+		const curve = new Float32Array(1024);
+		for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(((i / (curve.length - 1)) * 2 - 1) * 4);
+		drive.curve = curve;
+		drive.connect(comp);
+
+		// Огибающая с хрипом: нарастает, держится, спадает; поверх — дрожание амплитуды.
+		const env = ctx.createGain();
+		env.gain.setValueAtTime(0.0001, t);
+		env.gain.linearRampToValueAtTime(1, t + (dying ? 0.1 : 0.3));
+		env.gain.setValueAtTime(1, t + duration * 0.65);
+		env.gain.linearRampToValueAtTime(0.0001, t + duration);
+		const rasp = ctx.createGain();
+		rasp.gain.value = 0.6;
+		const raspLfo = ctx.createOscillator();
+		raspLfo.frequency.value = 19;
+		const raspDepth = ctx.createGain();
+		raspDepth.gain.value = 0.4;
+		raspLfo.connect(raspDepth);
+		raspDepth.connect(rasp.gain);
+		env.connect(rasp);
+		rasp.connect(drive);
+
+		// «Гласная»: полосы раскрываются («рра-») и закрываются («-ааа» → «ыы»).
+		const formants: BiquadFilterNode[] = [];
+		for (const [from, peak, q, level] of [
+			[280, 620, 4, 1],
+			[700, 1250, 5, 0.6],
+			[2200, 2800, 6, 0.25],
+		] as const) {
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.Q.value = q;
+			band.frequency.setValueAtTime(from, t);
+			band.frequency.linearRampToValueAtTime(peak, t + duration * 0.3);
+			band.frequency.linearRampToValueAtTime(from * 0.8, t + duration);
+			const g = ctx.createGain();
+			g.gain.value = level * 3;
+			band.connect(g);
+			g.connect(env);
+			formants.push(band);
+		}
+
+		// Голос: тон взмывает и сползает вниз (у предсмертного — падает сильнее), с дрожью.
+		const vibrato = ctx.createOscillator();
+		vibrato.frequency.value = 6;
+		const vibratoDepth = ctx.createGain();
+		vibratoDepth.gain.value = f0 * 0.05;
+		vibrato.connect(vibratoDepth);
+		for (const detune of [1, 1.018, 0.985, 1.5]) {
+			const osc = ctx.createOscillator();
+			osc.type = 'sawtooth';
+			osc.frequency.setValueAtTime(f0 * detune * 0.8, t);
+			osc.frequency.linearRampToValueAtTime(f0 * detune * 1.3, t + duration * 0.25);
+			osc.frequency.exponentialRampToValueAtTime(f0 * detune * (dying ? 0.45 : 0.75), t + duration);
+			vibratoDepth.connect(osc.frequency);
+			for (const band of formants) osc.connect(band);
+			osc.start(t);
+			osc.stop(t + duration + 0.05);
+		}
+
+		// Рычащий шум — из глотки.
+		const growl = this._noiseBurst(duration);
+		const growlBand = ctx.createBiquadFilter();
+		growlBand.type = 'lowpass';
+		growlBand.frequency.setValueAtTime(700, t);
+		growlBand.frequency.linearRampToValueAtTime(1600, t + duration * 0.3);
+		growlBand.frequency.linearRampToValueAtTime(400, t + duration);
+		const growlGain = ctx.createGain();
+		growlGain.gain.value = 0.8;
+		growl.connect(growlBand);
+		growlBand.connect(growlGain);
+		growlGain.connect(env);
+		growl.start(t);
+
+		// Гул — чувствуется больше, чем слышится.
+		const sub = ctx.createOscillator();
+		sub.type = 'sine';
+		sub.frequency.setValueAtTime(40, t);
+		sub.frequency.exponentialRampToValueAtTime(28, t + duration);
+		const subGain = ctx.createGain();
+		subGain.gain.setValueAtTime(0.0001, t);
+		subGain.gain.linearRampToValueAtTime(0.8, t + 0.2);
+		subGain.gain.exponentialRampToValueAtTime(0.001, t + duration + 0.4);
+		sub.connect(subGain);
+		subGain.connect(comp);
+		sub.start(t);
+		sub.stop(t + duration + 0.5);
+
+		// Визг поверх: узкая полоса шума скользит сверху вниз.
+		const screech = this._noiseBurst(duration * 0.7);
+		const band = ctx.createBiquadFilter();
+		band.type = 'bandpass';
+		band.Q.value = 10;
+		band.frequency.setValueAtTime(3600, t + 0.1);
+		band.frequency.exponentialRampToValueAtTime(900, t + duration * 0.7);
+		const screechGain = ctx.createGain();
+		screechGain.gain.setValueAtTime(0.0001, t);
+		screechGain.gain.linearRampToValueAtTime(0.6, t + 0.2);
+		screechGain.gain.exponentialRampToValueAtTime(0.001, t + duration * 0.7);
+		screech.connect(band);
+		band.connect(screechGain);
+		screechGain.connect(comp);
+		screech.start(t);
+
+		vibrato.start(t);
+		raspLfo.start(t);
+		vibrato.stop(t + duration + 0.05);
+		raspLfo.stop(t + duration + 0.05);
+	}
+
+	/** Огненный шар вылетел: гулкий «вжух» — шум через полосу, скользящую вниз, и низкий гул пламени. */
+	fireball(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		const whoosh = this._noiseBurst(1.2);
+		const band = ctx.createBiquadFilter();
+		band.type = 'bandpass';
+		band.Q.value = 1.5;
+		band.frequency.setValueAtTime(1800, t);
+		band.frequency.exponentialRampToValueAtTime(250, t + 1.1);
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(0.0001, t);
+		gain.gain.linearRampToValueAtTime(0.9, t + 0.08);
+		gain.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+		whoosh.connect(band);
+		band.connect(gain);
+		gain.connect(ctx.destination);
+		whoosh.start(t);
+		const roar = this._noiseBurst(1.2);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = 180;
+		const lowGain = ctx.createGain();
+		lowGain.gain.setValueAtTime(1.2, t);
+		lowGain.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+		roar.connect(low);
+		low.connect(lowGain);
+		lowGain.connect(ctx.destination);
+		roar.start(t);
+	}
+
+	/** Взрыв огненного шара: удар шума с темнеющим фильтром и низкий гул; level — громкость (далеко — тише). */
+	explosion(level: number): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		const comp = ctx.createDynamicsCompressor();
+		comp.threshold.value = -10;
+		comp.ratio.value = 6;
+		const master = ctx.createGain();
+		master.gain.value = level;
+		comp.connect(master);
+		master.connect(ctx.destination);
+		const blast = this._noiseBurst(1.0);
+		const filter = ctx.createBiquadFilter();
+		filter.type = 'lowpass';
+		filter.frequency.setValueAtTime(4000, t);
+		filter.frequency.exponentialRampToValueAtTime(150, t + 0.8);
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(1.6, t);
+		gain.gain.exponentialRampToValueAtTime(0.001, t + 1.0);
+		blast.connect(filter);
+		filter.connect(gain);
+		gain.connect(comp);
+		blast.start(t);
+		const sub = ctx.createOscillator();
+		sub.type = 'sine';
+		sub.frequency.setValueAtTime(70, t);
+		sub.frequency.exponentialRampToValueAtTime(30, t + 0.6);
+		const subGain = ctx.createGain();
+		subGain.gain.setValueAtTime(1, t);
+		subGain.gain.exponentialRampToValueAtTime(0.001, t + 0.7);
+		sub.connect(subGain);
+		subGain.connect(comp);
+		sub.start(t);
+		sub.stop(t + 0.75);
+	}
+
 	/** Запертую стеклянную дверь дёргают: лязг ручки и замка, дребезг стекла в раме — несколько рывков подряд. */
 	doorRattle(): void {
 		const ctx = this._context();
