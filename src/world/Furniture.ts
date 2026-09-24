@@ -37,101 +37,23 @@ export function createChair(): THREE.Group {
 	return group;
 }
 
-/**
- * Вид из окна первого этажа: горизонт на уровне глаз, внизу газон, забор, дорога с припаркованной машиной;
- * соседние панельки стоят на земле и уходят за верх рамы, неба немного. Рядом дерево, на стекле капли.
- */
-function createWindowViewTexture(seed: number): THREE.CanvasTexture {
-	const w = 72;
-	const h = 56;
-	const horizon = 30;
+/** Капли и дорожки дождя на стекле — прозрачный слой поверх вида за окном: мелкие точки и тонкие стёки. */
+function createRainOnGlassTexture(): THREE.CanvasTexture {
+	const w = 144;
+	const h = 112;
 	const canvas = document.createElement('canvas');
 	canvas.width = w;
 	canvas.height = h;
 	const ctx = canvas.getContext('2d')!;
-	let s = seed * 131 + 7;
+	let s = 17;
 	const rand = () => (s = (s * 16807) % 2147483647) / 2147483647;
-
-	const sky = ctx.createLinearGradient(0, 0, 0, horizon);
-	sky.addColorStop(0, '#9a9ea1');
-	sky.addColorStop(1, '#aaa9a3');
-	ctx.fillStyle = sky;
-	ctx.fillRect(0, 0, w, horizon);
-
-	// Дома: дальний ряд бледнее (дымка), ближний — темнее и выше, уходит за верх рамы.
-	for (const [minH, maxH, color, win] of [
-		[14, 20, '#7c7d7a', '#686a6b'],
-		[24, 40, '#5c5d5b', '#3c4246'],
-	] as const) {
-		let x = -Math.floor(rand() * 12);
-		while (x < w) {
-			const bw = 16 + Math.floor(rand() * 18);
-			const top = horizon - (minH + Math.floor(rand() * (maxH - minH)));
-			ctx.fillStyle = color;
-			ctx.fillRect(x, top, bw, horizon - top);
-			for (let wy = top + 2; wy < horizon - 2; wy += 4) {
-				for (let wx = x + 2; wx < x + bw - 2; wx += 3) {
-					ctx.fillStyle = rand() < 0.12 ? '#8a7a5a' : win;
-					ctx.fillRect(wx, wy, 2, 2);
-				}
-			}
-			x += bw + 3 + Math.floor(rand() * 8);
-		}
+	for (let i = 0; i < 70; i++) {
+		ctx.fillStyle = `rgba(215,222,226,${0.18 + rand() * 0.14})`;
+		const x = Math.floor(rand() * w);
+		const y = Math.floor(rand() * h);
+		// Большинство — просто капли, каждая пятая оставляет тонкий стёк вниз.
+		ctx.fillRect(x, y, 1, rand() < 0.2 ? 3 + Math.floor(rand() * 6) : 1);
 	}
-
-	// Земля: дальний газон, дорога с бордюрами, ближний газон двора.
-	ctx.fillStyle = '#5f6038';
-	ctx.fillRect(0, horizon, w, 3);
-	ctx.fillStyle = '#8a8880';
-	ctx.fillRect(0, horizon + 3, w, 1);
-	ctx.fillStyle = '#48494c';
-	ctx.fillRect(0, horizon + 4, w, 7);
-	ctx.fillStyle = '#8a8880';
-	ctx.fillRect(0, horizon + 11, w, 1);
-	for (let y = horizon + 12; y < h; y++) {
-		for (let x = 0; x < w; x += 2) {
-			ctx.fillStyle = rand() < 0.5 ? '#5d5e36' : '#66653b';
-			ctx.fillRect(x, y, 2, 1);
-		}
-	}
-	// Лужа на дороге.
-	ctx.fillStyle = '#5e6266';
-	ctx.fillRect(40, horizon + 8, 9, 2);
-
-	// Машина у обочины.
-	const carX = 6 + Math.floor(rand() * 20);
-	ctx.fillStyle = rand() < 0.5 ? '#6a2a25' : '#3d5566';
-	ctx.fillRect(carX, horizon + 3, 14, 4);
-	ctx.fillRect(carX + 3, horizon + 1, 7, 2);
-	ctx.fillStyle = '#2a2f33';
-	ctx.fillRect(carX + 4, horizon + 1, 5, 1);
-	ctx.fillStyle = '#161616';
-	ctx.fillRect(carX + 2, horizon + 7, 2, 1);
-	ctx.fillRect(carX + 10, horizon + 7, 2, 1);
-
-	// Забор двора — тёмные прутья поверх дороги.
-	ctx.fillStyle = '#26272a';
-	ctx.fillRect(0, horizon + 5, w, 1);
-	ctx.fillRect(0, horizon + 13, w, 1);
-	for (let x = 1; x < w; x += 3) ctx.fillRect(x, horizon + 4, 1, 11);
-
-	// Дерево рядом с окном: ствол от земли, крона закрывает часть домов.
-	const tx = w - 14 - Math.floor(rand() * 10);
-	ctx.fillStyle = '#3b2f22';
-	ctx.fillRect(tx, 12, 3, h - 12 - 4);
-	ctx.fillRect(tx - 3, 18, 3, 1);
-	ctx.fillRect(tx + 3, 15, 3, 1);
-	for (let i = 0; i < 40; i++) {
-		ctx.fillStyle = ['#5e4a2c', '#6f5a34', '#54462a'][i % 3];
-		ctx.fillRect(tx - 10 + Math.floor(rand() * 22), 2 + Math.floor(rand() * 16), 3, 3);
-	}
-
-	// Капли и дорожки дождя на стекле.
-	ctx.fillStyle = 'rgba(230,234,236,0.35)';
-	for (let i = 0; i < 22; i++) {
-		ctx.fillRect(Math.floor(rand() * w), Math.floor(rand() * h), 1, 1 + Math.floor(rand() * 4));
-	}
-
 	const texture = new THREE.CanvasTexture(canvas);
 	texture.magFilter = THREE.NearestFilter;
 	texture.minFilter = THREE.NearestFilter;
@@ -165,20 +87,23 @@ export function createCeilingTileTexture(repeatX: number, repeatY: number): THRE
 }
 
 export interface WindowOptions {
+	/** Что видно за стеклом (текстура портала на улицу); без неё — просто тусклое стекло. */
+	view?: THREE.Texture;
 	/** Жалюзи, опущенные на долю высоты (0 — поднятые, не видны). */
 	blinds?: number;
+	/** Наклон ламелей, рад: ~0.5 — приоткрыты, ~1.3 — сомкнуты наглухо. */
+	blindsTilt?: number;
 	/** Цветок в горшке на подоконнике. */
 	plant?: boolean;
-	seed?: number;
 }
 
 /**
- * Пластиковое окно на внутренней стороне стены: вид наружу в стекле, белая рама на две створки (одна с ручкой),
+ * Пластиковое окно на внутренней стороне стены: вид наружу в стекле (с каплями дождя), белая рама на две створки (одна с ручкой),
  * подоконник, под ним батарея; по желанию — жалюзи и цветок. Лицом к +Z, начало координат — центр стекла на стене.
  */
 export function createWindow(width: number, height: number, options: WindowOptions = {}): THREE.Group {
 	const group = new THREE.Group();
-	const { blinds = 0, plant = false, seed = 1 } = options;
+	const { view, blinds = 0, blindsTilt = 0.5, plant = false } = options;
 	const white = new THREE.MeshStandardMaterial({ color: '#f1f0ec', roughness: 0.4 });
 	const part = (w: number, h: number, d: number, x: number, y: number, z: number, m: THREE.Material = white) => {
 		const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
@@ -188,13 +113,23 @@ export function createWindow(width: number, height: number, options: WindowOptio
 		return mesh;
 	};
 
-	const view = createWindowViewTexture(seed);
+	// Вид за окном не освещается лампами офиса — это «другой мир» за стеклом, поэтому MeshBasic.
 	const glass = new THREE.Mesh(
 		new THREE.PlaneGeometry(width, height),
-		new THREE.MeshStandardMaterial({ map: view, emissive: '#ffffff', emissiveMap: view, emissiveIntensity: 0.85, roughness: 0.1 })
+		view
+			? new THREE.MeshBasicMaterial({ map: view })
+			: new THREE.MeshStandardMaterial({ color: '#8d9398', emissive: '#6d7378', emissiveIntensity: 0.5 })
 	);
 	glass.position.z = 0.005;
 	group.add(glass);
+	if (view) {
+		const drops = new THREE.Mesh(
+			new THREE.PlaneGeometry(width, height),
+			new THREE.MeshBasicMaterial({ map: createRainOnGlassTexture(), transparent: true, depthWrite: false })
+		);
+		drops.position.z = 0.008;
+		group.add(drops);
+	}
 
 	// Откосы — светлая рамка-ниша вокруг проёма, затем рама и импост между створками.
 	const f = 0.07;
@@ -244,7 +179,7 @@ export function createWindow(width: number, height: number, options: WindowOptio
 		for (let y = top - 0.03; y > bottom; y -= 0.035) {
 			const slat = new THREE.Mesh(new THREE.BoxGeometry(width - 0.04, 0.004, 0.04), slatMat);
 			slat.position.set(0, y, 0.13);
-			slat.rotation.x = 0.5;
+			slat.rotation.x = blindsTilt;
 			group.add(slat);
 		}
 		part(width - 0.02, 0.02, 0.045, 0, bottom, 0.13, white);

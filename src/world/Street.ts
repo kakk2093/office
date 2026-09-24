@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
 import { Rain } from './Rain.js';
+import type { PortalFrame } from '../render/WindowPortal.js';
 import { Sky, SKY_HORIZON, SUN_DIRECTION } from './Sky.js';
 import { createPanelBuilding, createCanteen, createYardRoadTexture, PANEL_BUILDING_DEPTH, CANTEEN_SIZE } from './Buildings.js';
 import {
@@ -44,6 +45,9 @@ const BUILDING_DEPTH = 12;
 const BUILDING_HEIGHT = FLOORS * FLOOR_HEIGHT;
 /** Фасад подъезда — по оси Z, лицом на юг (к игроку). */
 const FACADE_Z = -8;
+/** Окно офиса на фасаде (первый этаж, левее чёрной двери). */
+const OFFICE_WINDOW_X = -7;
+const OFFICE_WINDOW_Y = 1.6;
 
 /** Двор, огороженный забором: прямоугольник вокруг дома, с калиткой в заборе со стороны спавна. */
 const YARD_MIN_X = -16;
@@ -95,6 +99,13 @@ export class Street {
 	readonly scene = new THREE.Scene();
 	/** У чёрной двери слева от подъезда — сюда переносит игрока переход с улицы. */
 	readonly spawnPoint: SpawnPoint = { x: -2.5, z: -5 };
+	/** Окно офиса на фасаде большого дома — левее чёрной двери, смотрит во двор (на юг). Через него офис видит улицу
+	 * (см. WindowPortal); центр чуть перед фасадом, чтобы стена дома оставалась за ближней плоскостью камеры. */
+	readonly officeWindow: PortalFrame = {
+		center: new THREE.Vector3(OFFICE_WINDOW_X, OFFICE_WINDOW_Y, FACADE_Z + 0.06),
+		right: new THREE.Vector3(-1, 0, 0),
+		outward: new THREE.Vector3(0, 0, 1),
+	};
 	/** Калитка в заборе — со стороны спавна. */
 	readonly gate: GatePoint = { x: 0, z: YARD_MAX_Z };
 	private readonly rain = new Rain();
@@ -127,6 +138,7 @@ export class Street {
 		this._buildGround();
 		this._buildBuilding();
 		this._buildBlackDoor();
+		this._buildOfficeWindow();
 		this._registerFacadeColliders(colliders);
 		this._buildFence(colliders);
 		this._buildGate();
@@ -508,6 +520,35 @@ export class Street {
 		const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.06), new THREE.MeshStandardMaterial({ color: '#8a867c' }));
 		handle.position.set(this.spawnPoint.x + 0.3, 1.0, FACADE_Z + 0.06);
 		this.scene.add(handle);
+	}
+
+	/** Окно офиса снаружи: белая рама и тёмное стекло на фасаде. Лежит за плоскостью officeWindow — в вид из офиса не попадает. */
+	private _buildOfficeWindow(): void {
+		const w = 1.8;
+		const h = 1.4;
+		const z = FACADE_Z + 0.02;
+		const glass = new THREE.Mesh(
+			new THREE.PlaneGeometry(w, h),
+			new THREE.MeshStandardMaterial({ color: '#3a444a', roughness: 0.15, metalness: 0.4 })
+		);
+		glass.position.set(OFFICE_WINDOW_X, OFFICE_WINDOW_Y, z);
+		this.scene.add(glass);
+		const frameMat = new THREE.MeshStandardMaterial({ color: '#e8e7e2' });
+		for (const [x, y, fw, fh] of [
+			[0, h / 2, w + 0.1, 0.08],
+			[0, -h / 2, w + 0.1, 0.08],
+			[-w / 2, 0, 0.08, h],
+			[w / 2, 0, 0.08, h],
+			[0, 0, 0.06, h],
+		] as const) {
+			const bar = new THREE.Mesh(new THREE.BoxGeometry(fw, fh, 0.02), frameMat);
+			bar.position.set(OFFICE_WINDOW_X + x, OFFICE_WINDOW_Y + y, z);
+			this.scene.add(bar);
+		}
+		// Отлив под окном.
+		const sill = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.03, 0.02), new THREE.MeshStandardMaterial({ color: '#9a9c9e' }));
+		sill.position.set(OFFICE_WINDOW_X, OFFICE_WINDOW_Y - h / 2 - 0.06, z);
+		this.scene.add(sill);
 	}
 
 	/** Калитка в проёме забора (петля — с западного края), закрыта по умолчанию. */

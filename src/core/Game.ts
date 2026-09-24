@@ -2,9 +2,10 @@ import * as THREE from 'three';
 import { Input } from './Input.js';
 import { PlayerController } from '../player/PlayerController.js';
 import { CircleColliders } from '../physics/CircleColliders.js';
-import { Room } from '../world/Room.js';
+import { Room, VIEW_WINDOW_SIZE } from '../world/Room.js';
 import { Street } from '../world/Street.js';
 import { PostProcess } from '../render/PostProcess.js';
+import { WindowPortal } from '../render/WindowPortal.js';
 import { Footsteps } from '../audio/Footsteps.js';
 import { Sfx } from '../audio/Sfx.js';
 import { Music } from '../audio/Music.js';
@@ -29,6 +30,8 @@ export class Game {
 	private readonly renderer = new THREE.WebGLRenderer({ antialias: false });
 	private readonly camera = new THREE.PerspectiveCamera(75, 1, 0.1, 100);
 	private readonly post = new PostProcess(this.renderer);
+	/** Окно офиса — живой вид на улицу (уличная сцена рисуется в текстуру стекла). */
+	private readonly portal = new WindowPortal(this.renderer, VIEW_WINDOW_SIZE.width, VIEW_WINDOW_SIZE.height);
 	private readonly timer = new THREE.Timer();
 	private readonly input: Input;
 	private readonly colliders = new CircleColliders();
@@ -55,11 +58,12 @@ export class Game {
 		document.body.appendChild(this.renderer.domElement);
 
 		this.input = new Input(this.renderer.domElement);
-		this.room = new Room(this.colliders);
+		this.room = new Room(this.colliders, this.portal.texture);
 		this.street = new Street(this.streetColliders);
 		this.player = new PlayerController(this.camera, this.input, this.room, this.colliders);
 		this.player.onStep = (loud) => this.footsteps.play(loud);
-		this.player.spawn(0, 4, 0);
+		const { spawnPoint } = this.room;
+		this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
 		this.flash.style.background = FLASH_COLOR;
 
 		// Автоплей звука запрещён без жеста пользователя — запускаем музыку на первый клик/клавишу.
@@ -82,13 +86,24 @@ export class Game {
 
 		this.player.update(dt);
 		this.room.update(dt);
-		this.street.update(dt, this.camera.position);
 		this._updateDoor();
 		this._updateFlash(dt);
 		this._clamp();
 		this.hint.style.display = this.input.isPointerLocked ? 'none' : 'flex';
+		this._updateStreet(dt);
 
 		this.post.render(this.outside ? this.street.scene : this.room.scene, this.camera);
+	}
+
+	/** Улица живёт всегда: снаружи — вокруг игрока; изнутри — вокруг камеры окна-портала, и её вид рисуется на стекло. */
+	private _updateStreet(dt: number): void {
+		if (this.outside) {
+			this.street.update(dt, this.camera.position);
+			return;
+		}
+		this.portal.placeCamera(this.camera.position, this.room.viewWindow, this.street.officeWindow);
+		this.street.update(dt, this.portal.camera.position);
+		this.portal.render(this.street.scene);
 	}
 
 	/** Подсказка E: внутри — у двери офиса, снаружи — у калитки в заборе. */

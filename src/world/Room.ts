@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
+import type { PortalFrame } from '../render/WindowPortal.js';
 import {
 	createDesk,
 	createChair,
@@ -35,20 +36,33 @@ import {
 } from './DeskItems.js';
 
 const WIDTH = 10;
-const DEPTH = 12;
+const DEPTH = 9;
+/** Северная стена (с росписью, к ней торцом стоят столы) — на месте; комната тянется от неё на DEPTH к южной (с доской). */
+const NORTH_Z = -6;
+const SOUTH_Z = NORTH_Z + DEPTH;
+const CENTER_Z = (NORTH_Z + SOUTH_Z) / 2;
 const HEIGHT = 3;
 const WALL_THICKNESS = 0.2;
 /** Сторона плиты подвесного потолка. */
 const CEILING_TILE = 0.6;
+/** Окна в западной стене: центр стекла по X/Y, размер; одно с видом на улицу, другое за закрытыми жалюзи. */
+const WINDOW_WIDTH = 1.8;
+const WINDOW_HEIGHT = 1.4;
+/** Размер стекла окна с видом — нужен порталу ещё до создания комнаты. */
+export const VIEW_WINDOW_SIZE = { width: WINDOW_WIDTH, height: WINDOW_HEIGHT } as const;
+const WINDOW_X = -WIDTH / 2 + WALL_THICKNESS / 2 + 0.01;
+const WINDOW_Y = 1.6;
+const WINDOW_VIEW_Z = 1;
+const WINDOW_CLOSED_Z = -3;
 /** Центры клеток потолка под светильники (швы сетки идут через 0 с шагом CEILING_TILE): два ряда над блоками столов,
  * вдоль комнаты — через клетку-две. */
 const LAMP_X = [-2.1, 2.1];
-const LAMP_Z = [-4.5, -2.7, -0.9, 0.9, 2.7, 4.5];
+const LAMP_Z = [-4.5, -2.7, -0.9, 0.9, 2.1];
 /** У каких светильников есть точечный свет [z, отбрасывает тень]. */
 const LIGHT_Z: [number, boolean][] = [
-	[-2.7, true],
-	[0.9, true],
-	[4.5, false],
+	[-4.5, true],
+	[-0.9, true],
+	[2.1, false],
 ];
 /** Верх столешницы: createDesk кладёт её центр в y=0.74 при толщине 0.04. */
 const DESK_SURFACE_Y = 0.76;
@@ -56,7 +70,8 @@ const DESK_SURFACE_Y = 0.76;
 const SEATS_PER_ROW = 3;
 const DESK_LENGTH = 1.8;
 const SEAT_SPACING = DESK_LENGTH;
-const ROW_CENTER_Z = -1.2;
+/** Ряды упираются торцом в северную стену — напротив доски: дальний стол касается стены. */
+const ROW_CENTER_Z = NORTH_Z + WALL_THICKNESS / 2 + (SEATS_PER_ROW * DESK_LENGTH) / 2;
 /** Половина ширины столешницы (0.7) — на этот шаг раздвинуты 2 колонки блока, чтобы столы касались краями. */
 const DESK_HALF_WIDTH = 0.35;
 const SCREEN_KINDS: ScreenKind[] = ['code', 'game', 'art', 'desktop'];
@@ -67,7 +82,8 @@ const STICKY_COLORS = ['#f4e04a', '#f29ab8', '#8fd3f0', '#a8e07a'];
  * Сама улица — отдельная сцена (см. Street), сюда не пристроена: за дверью просто небо в проёме. */
 const DOOR_WIDTH = 1.0;
 const DOOR_HEIGHT = 2.1;
-const DOOR_Z = 4.3;
+/** Дверь — в 1.7 м от южной стены. */
+const DOOR_Z = SOUTH_Z - 1.7;
 /** Сколько секунд едет полотно между открытым и закрытым положением. */
 const DOOR_ANIM_TIME = 0.5;
 /** Небо пасмурного дня, видное в проёме открытой двери. */
@@ -90,7 +106,15 @@ export interface Doorway {
 /** Простой офис: пол/стены/потолок, окна на одной стене, два ряда столов с мониторами и стульями. */
 export class Room {
 	readonly scene = new THREE.Scene();
-	readonly bounds: RoomBounds = { minX: -WIDTH / 2, maxX: WIDTH / 2, minZ: -DEPTH / 2, maxZ: DEPTH / 2 };
+	readonly bounds: RoomBounds = { minX: -WIDTH / 2, maxX: WIDTH / 2, minZ: NORTH_Z, maxZ: SOUTH_Z };
+	/** Старт — у левого окна (с цветком), лицом к стеклу: сначала вид на улицу, офис за спиной. yaw = π/2 — взгляд на запад (−X). */
+	readonly spawnPoint = { x: -WIDTH / 2 + 1.4, z: WINDOW_VIEW_Z, yaw: Math.PI / 2 };
+	/** Окно с видом на улицу — для портала (см. WindowPortal): «вправо» для смотрящего наружу и «наружу» — на запад. */
+	readonly viewWindow: PortalFrame = {
+		center: new THREE.Vector3(WINDOW_X + 0.005, WINDOW_Y, WINDOW_VIEW_Z),
+		right: new THREE.Vector3(0, 0, -1),
+		outward: new THREE.Vector3(-1, 0, 0),
+	};
 	readonly doorway: Doorway = {
 		wallX: WIDTH / 2,
 		z: DOOR_Z,
@@ -114,7 +138,11 @@ export class Room {
 		return this.doorOpenState;
 	}
 
-	constructor(private readonly colliders: CircleColliders) {
+	/** windowView — картинка улицы для окна (текстура портала). */
+	constructor(
+		private readonly colliders: CircleColliders,
+		private readonly windowView: THREE.Texture
+	) {
 		// Фон сцены виден только сквозь открытый проём — тусклое небо в тучах снаружи.
 		this.scene.background = new THREE.Color(SKY_COLOR);
 		this.scene.add(new THREE.AmbientLight('#ffffff', 0.7));
@@ -168,25 +196,26 @@ export class Room {
 	private _buildShell(): void {
 		const floor = new THREE.Mesh(new THREE.PlaneGeometry(WIDTH, DEPTH), new THREE.MeshStandardMaterial({ color: '#2b2c2e' }));
 		floor.rotation.x = -Math.PI / 2;
+		floor.position.z = CENTER_Z;
 		floor.receiveShadow = true;
 		this.scene.add(floor);
 
-		// Сетку плит сдвигаем так, чтобы швы шли через центр комнаты: светильники встают ровно в клетки (см. LAMP_X/LAMP_Z).
+		// Сетку плит сдвигаем так, чтобы швы шли через x = 0 и z = 0: светильники встают ровно в клетки (см. LAMP_X/LAMP_Z).
 		const ceilingTex = createCeilingTileTexture(WIDTH / CEILING_TILE, DEPTH / CEILING_TILE);
-		ceilingTex.offset.set(-((WIDTH / 2) % CEILING_TILE) / CEILING_TILE, -((DEPTH / 2) % CEILING_TILE) / CEILING_TILE);
+		ceilingTex.offset.set(-((WIDTH / 2) % CEILING_TILE) / CEILING_TILE, -((-NORTH_Z) % CEILING_TILE) / CEILING_TILE);
 		const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(WIDTH, DEPTH), new THREE.MeshStandardMaterial({ map: ceilingTex }));
 		ceiling.rotation.x = Math.PI / 2;
-		ceiling.position.y = HEIGHT;
+		ceiling.position.set(0, HEIGHT, CENTER_Z);
 		this.scene.add(ceiling);
 
 		const wallMat = new THREE.MeshStandardMaterial({ color: '#eae7df' });
 		const muralMat = new THREE.MeshStandardMaterial({ map: createMuralTexture() });
 		const north = new THREE.Mesh(new THREE.BoxGeometry(WIDTH, HEIGHT, WALL_THICKNESS), muralMat);
-		north.position.set(0, HEIGHT / 2, -DEPTH / 2);
+		north.position.set(0, HEIGHT / 2, NORTH_Z);
 		const south = new THREE.Mesh(new THREE.BoxGeometry(WIDTH, HEIGHT, WALL_THICKNESS), wallMat);
-		south.position.set(0, HEIGHT / 2, DEPTH / 2);
+		south.position.set(0, HEIGHT / 2, SOUTH_Z);
 		const west = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICKNESS, HEIGHT, DEPTH), wallMat);
-		west.position.set(-WIDTH / 2, HEIGHT / 2, 0);
+		west.position.set(-WIDTH / 2, HEIGHT / 2, CENTER_Z);
 		for (const wall of [north, south, west]) {
 			wall.receiveShadow = true;
 			this.scene.add(wall);
@@ -198,13 +227,13 @@ export class Room {
 	private _buildEastWallWithDoorway(wallMat: THREE.Material): void {
 		const { zMin, zMax } = this.doorway;
 
-		const northLen = zMin - -DEPTH / 2;
+		const northLen = zMin - NORTH_Z;
 		const northWall = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICKNESS, HEIGHT, northLen), wallMat);
-		northWall.position.set(WIDTH / 2, HEIGHT / 2, -DEPTH / 2 + northLen / 2);
+		northWall.position.set(WIDTH / 2, HEIGHT / 2, NORTH_Z + northLen / 2);
 
-		const southLen = DEPTH / 2 - zMax;
+		const southLen = SOUTH_Z - zMax;
 		const southWall = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICKNESS, HEIGHT, southLen), wallMat);
-		southWall.position.set(WIDTH / 2, HEIGHT / 2, DEPTH / 2 - southLen / 2);
+		southWall.position.set(WIDTH / 2, HEIGHT / 2, SOUTH_Z - southLen / 2);
 
 		const lintelHeight = HEIGHT - DOOR_HEIGHT;
 		const lintel = new THREE.Mesh(new THREE.BoxGeometry(WALL_THICKNESS, lintelHeight, DOOR_WIDTH), wallMat);
@@ -217,13 +246,13 @@ export class Room {
 	}
 
 	private _buildWindows(): void {
-		// На одном окне приспущены жалюзи, на подоконнике другого — цветок.
+		// Левое окно (с цветком) — живой вид на улицу через портал; второе наглухо закрыто жалюзи.
 		for (const [z, options] of [
-			[-3, { blinds: 0.35, seed: 1 }],
-			[1, { plant: true, seed: 2 }],
+			[WINDOW_CLOSED_Z, { blinds: 1, blindsTilt: 1.35 }],
+			[WINDOW_VIEW_Z, { plant: true, view: this.windowView }],
 		] as const) {
-			const win = createWindow(1.8, 1.4, options);
-			win.position.set(-WIDTH / 2 + WALL_THICKNESS / 2 + 0.01, 1.6, z);
+			const win = createWindow(WINDOW_WIDTH, WINDOW_HEIGHT, options);
+			win.position.set(WINDOW_X, WINDOW_Y, z);
 			win.rotation.y = Math.PI / 2;
 			this.scene.add(win);
 		}
@@ -231,14 +260,14 @@ export class Room {
 
 	private _buildAc(): void {
 		const ac = createAcUnit();
-		ac.position.set(3, HEIGHT - 0.35, -DEPTH / 2 + WALL_THICKNESS / 2 + 0.12);
+		ac.position.set(-3, HEIGHT - 0.35, NORTH_Z + WALL_THICKNESS / 2 + 0.12);
 		this.scene.add(ac);
 	}
 
 	/** Южная стена — справа от двери, если стоять к ней лицом: у двери аптечка, по центру маркерная доска
 	 * с глобусом, дальше навесные полки с мелочёвкой. Всё вешается на внутреннюю грань стены лицом в комнату. */
 	private _buildSouthWallDecor(): void {
-		const wallZ = DEPTH / 2 - WALL_THICKNESS / 2;
+		const wallZ = SOUTH_Z - WALL_THICKNESS / 2;
 		for (const [item, x, y] of [
 			[createFirstAidCabinet(), WIDTH / 2 - 0.9, 1.5],
 			[createWhiteboard(3.2, 1.5), 0.8, 1.6],
