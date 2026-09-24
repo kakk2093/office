@@ -12,10 +12,12 @@ import { Sfx } from '../audio/Sfx.js';
 import { Music } from '../audio/Music.js';
 import { RainSound } from '../audio/RainSound.js';
 import { DreadAmbient } from '../audio/DreadAmbient.js';
-import type { Interaction, InteractionSound, Voice } from './Interaction.js';
+import { PLAYER_NAME, type Dialogue, type Interaction, type InteractionSound, type Voice } from './Interaction.js';
 import { DialogueBox } from '../ui/DialogueBox.js';
 import { ObjectiveHud } from '../ui/ObjectiveHud.js';
 import { TargetMarker } from '../ui/TargetMarker.js';
+import { Letterbox, LETTERBOX_SLIDE_TIME } from '../ui/Letterbox.js';
+import { StartScreen } from '../ui/StartScreen.js';
 
 /** Отступ от стен, на который не пускаем камеру (стены — не коллайдеры, а простой клэмп по границам). */
 const WALL_MARGIN = 0.4;
@@ -34,6 +36,15 @@ const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, play
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
 const DEBUG_START_AT_CANTEEN = false;
+/** Сбой картинки и звука (глитч в реплике): сколько длится, с. */
+const GLITCH_TIME = 0.4;
+/** После «Старт» — столько секунд просто смотрим в окно (без управления), потом начинаются мысли героя. */
+const INTRO_DELAY = 1;
+/** Описание на стартовом экране. */
+const START_DESCRIPTION = [
+	'Очередной рабочий день. Ничего примечательного.',
+	'Единственное, что тебя радует, — сегодня четверг. А значит, в столовой соляночка.',
+];
 /** Граница уличного плейна, за которую не пускаем камеру. */
 const STREET_HALF = 74;
 
@@ -60,16 +71,25 @@ export class Game {
 	private readonly dialogue = new DialogueBox();
 	private readonly objectiveHud = new ObjectiveHud();
 	private readonly targetMarker = new TargetMarker();
+	private readonly letterbox: Letterbox;
 	private readonly hint = document.getElementById('hint')!;
 	private readonly prompt = document.getElementById('prompt')!;
 	private readonly flash = document.getElementById('flash')!;
 	/** Время с начала перехода, с; null — переход не идёт. */
 	private flashTime: number | null = null;
 	private flashTeleported = false;
+	/** Время с начала глитча, с; null — не идёт. */
+	private glitchTime: number | null = null;
 	/** Текущее место; рендерится только его сцена. Из офиса — только на улицу (без возврата), улица ⇄ столовая. */
 	private place: Place = 'office';
 	/** Куда ведёт идущий переход. */
 	private destination: Place = 'street';
+	/** Вступление у окна офиса ещё не закончилось: стоим на месте, пока герой не договорит. */
+	private introPending = false;
+	/** Стартовый экран: пока открыт, игра стоит (кадр рисуется, но ничего не обновляется). */
+	private readonly startScreen = new StartScreen(START_DESCRIPTION);
+	/** Сколько ещё ждать до вступительного диалога после «Старт», с; null — не ждём. */
+	private introTimer: number | null = null;
 	readonly room: Room;
 	readonly street: Street;
 	readonly canteen: Canteen;
@@ -94,10 +114,20 @@ export class Game {
 		} else {
 			const { spawnPoint } = this.room;
 			this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
+			this.introPending = true;
 		}
+		// Кинорамка — на каждый диалог (и на вступление: выезжает вместе с ним, через секунду после «Старт»).
+		this.letterbox = new Letterbox();
 		this.flash.style.background = FLASH_COLOR;
 		this.dialogue.onBlip = (voice) => this.sfx.voice(VOICE_PITCH[voice]);
-		this.dialogue.onEnd = (sound) => this._playSound(sound);
+		this.dialogue.onEnd = (sound) => {
+			this._playSound(sound);
+			this.letterbox.hide();
+		};
+		this.dialogue.onGlitch = () => {
+			this.glitchTime = 0;
+			this.sfx.glitch(GLITCH_TIME);
+		};
 		this.canteen.onSit = (seat) => {
 			this.player.sit(seat.x, seat.z, seat.yaw, seat.eyeY);
 		};
@@ -110,12 +140,17 @@ export class Game {
 		this.canteen.onDoorSlam = () => this.sfx.scare();
 		this.canteen.onCameraPose = (pose) => this.player.setPose(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
 
-		// Автоплей звука запрещён без жеста пользователя — запускаем звук на первый клик/клавишу.
-		// Если игра началась не в офисе — сразу и уличное (дождь, ударные): до жеста их нельзя включать,
-		// иначе удары копятся в приостановленном звуке и потом звучат разом.
+		// Автоплей звука запрещён без жеста пользователя — запускаем звук на первый клик/клавишу (обычно ещё
+		// на стартовом экране). Если игра началась не в офисе — сразу и уличное (дождь, ударные): до жеста их нельзя
+		// включать, иначе удары копятся в приостановленном звуке и потом звучат разом.
 		const startAudio = () => {
 			this.music.start();
 			if (this.place !== 'office') this._startStreetAudio();
+		};
+		// «Старт» — тоже жест: захватываем мышь; через INTRO_DELAY начнутся мысли героя.
+		this.startScreen.onStart = () => {
+			this.input.lockPointer();
+			if (this.introPending) this.introTimer = INTRO_DELAY;
 		};
 		window.addEventListener('pointerdown', startAudio, { once: true });
 		window.addEventListener('keydown', startAudio, { once: true });
@@ -133,8 +168,25 @@ export class Game {
 		this.timer.update(time);
 		const dt = Math.min(this.timer.getDelta(), 0.1);
 
+		// Стартовый экран: игра стоит — только кадр под ним (чтобы после «Старт» сразу было что показать).
+		if (this.startScreen.open) {
+			this.input.consumeMouseDelta();
+			this.hint.style.display = 'none';
+			this._updateStreet(0);
+			this.post.render(this._scene(), this.camera);
+			this.input.endFrame();
+			return;
+		}
+		if (this.introTimer !== null) {
+			this.introTimer -= dt;
+			if (this.introTimer <= 0) {
+				this.introTimer = null;
+				this._startDialogue({ ...this.room.intro, onEnd: () => (this.introPending = false) });
+			}
+		}
+
 		// Во время разговора стоим на месте; движение мыши сбрасываем, чтобы после не было рывка взгляда.
-		if (this.dialogue.active) this.input.consumeMouseDelta();
+		if (this.dialogue.active || this.introPending) this.input.consumeMouseDelta();
 		else this.player.update(dt);
 		this.dialogue.update(dt);
 		this.room.update(dt);
@@ -143,15 +195,37 @@ export class Game {
 		this._clamp();
 		// После клэмпа — поднос в руках встаёт перед камерой в её итоговом положении.
 		this.canteen.update(dt, this.camera);
-		// Задачи пока есть только в столовой: плашка в углу и маркер цели (прячем на время перехода и разговора).
-		const objective = this.place === 'canteen' && this.flashTime === null ? this.canteen.objective : null;
+		// Задача: плашка в углу и маркер цели (прячем на время перехода; маркер — и на время разговора).
+		const objective = this._objective();
 		this.objectiveHud.set(objective?.text ?? null);
 		this.targetMarker.update(this.camera, this.dialogue.active ? null : (objective?.at ?? null));
 		this.hint.style.display = this.input.isPointerLocked ? 'none' : 'flex';
 		this._updateStreet(dt);
+		this._updateGlitch(dt);
 
 		this.post.render(this._scene(), this.camera);
 		this.input.endFrame();
+	}
+
+	/** Глитч: сила скачет от кадра к кадру (то сильный сбой, то почти чисто) и к концу спадает; картинка каждый кадр новая. */
+	private _updateGlitch(dt: number): void {
+		if (this.glitchTime === null) return;
+		this.glitchTime += dt;
+		if (this.glitchTime >= GLITCH_TIME) {
+			this.glitchTime = null;
+			this.post.setGlitch(0, 0);
+			return;
+		}
+		const fade = 1 - (this.glitchTime / GLITCH_TIME) * 0.5;
+		this.post.setGlitch((Math.random() < 0.75 ? 1 : 0.15) * fade, Math.random() * 100);
+	}
+
+	/** Текущая задача по месту: офис — выйти (после вступления), улица — двор и столовая, столовая — своя цепочка. */
+	private _objective(): { text: string; at: THREE.Vector3 | null } | null {
+		if (this.flashTime !== null) return null;
+		if (this.place === 'canteen') return this.canteen.objective;
+		if (this.place === 'street') return this.street.objective(this.camera.position);
+		return this.introPending ? null : this.room.objective;
 	}
 
 	private _scene(): THREE.Scene {
@@ -181,6 +255,11 @@ export class Game {
 			if (this.input.consumePress('Mouse0')) this.dialogue.advance();
 			return;
 		}
+		// Вступление ещё не началось (ждём первый клик) — никаких действий.
+		if (this.introPending) {
+			this.prompt.style.display = 'none';
+			return;
+		}
 		// Катсцена: управление заблокировано — подсказок нет.
 		if (this.place === 'canteen' && this.canteen.cutsceneActive) {
 			this.prompt.style.display = 'none';
@@ -206,10 +285,18 @@ export class Game {
 		this.prompt.textContent = usable ? `E — ${action.text}` : action.text;
 		this.prompt.style.display = 'block';
 		if (usable && this.input.consumePress('KeyE')) {
-			if (action.dialogue) this.dialogue.start(action.dialogue);
+			if (action.dialogue) this._startDialogue(action.dialogue);
 			else action.run?.();
 			this._playSound(action.sound);
 		}
+	}
+
+	/** Разговор всегда в кинорамке: полосы выезжают, реплики — на нижней, когда полосы доехали (если уже стоят —
+	 * сразу). Уезжают полосы по dialogue.onEnd. */
+	private _startDialogue(dialogue: Dialogue): void {
+		const delay = this.letterbox.visible ? 0 : LETTERBOX_SLIDE_TIME;
+		this.letterbox.show();
+		this.dialogue.start(dialogue, delay);
 	}
 
 	private _playSound(sound: InteractionSound | undefined): void {
@@ -248,7 +335,7 @@ export class Game {
 			const text = this.canteen.finished ? 'Не поддаётся.' : 'Незачем выходить. Я же ещё не поел соляночку.';
 			return {
 				text: 'выйти на улицу',
-				dialogue: { lines: [{ speaker: 'Я', text, voice: 'player' }] },
+				dialogue: { lines: [{ speaker: PLAYER_NAME, text, voice: 'player' }] },
 			};
 		}
 

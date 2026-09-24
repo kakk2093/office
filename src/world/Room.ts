@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
 import type { PortalFrame } from '../render/WindowPortal.js';
+import { PLAYER_NAME, type Dialogue } from '../core/Interaction.js';
 import {
 	createDesk,
 	createChair,
@@ -109,6 +110,23 @@ export class Room {
 	readonly bounds: RoomBounds = { minX: -WIDTH / 2, maxX: WIDTH / 2, minZ: NORTH_Z, maxZ: SOUTH_Z };
 	/** Старт — у левого окна (с цветком), лицом к стеклу: сначала вид на улицу, офис за спиной. yaw = π/2 — взгляд на запад (−X). */
 	readonly spawnPoint = { x: -WIDTH / 2 + 1.4, z: WINDOW_VIEW_Z, yaw: Math.PI / 2 };
+	/** Мысли героя у окна в начале игры; пока они идут, двигаться нельзя. */
+	readonly intro: Dialogue = {
+		lines: [
+			'Дождь.',
+			'Снова дождь.',
+			'Уже и не припомню, когда последний раз была хорошая погода.',
+			// Имя стёрто: печатается начало фразы (пропустить кликом нельзя), а на месте имени — разом,
+			// со сбоем картинки и звука.
+			['Такая погода, когда так приятно погулять по лесу с ', '_̷̧̤̰̥̯҇͌͒̉̌̌_̵̢͕͉̉̓̓̑͞_̸̡̝͖̐͊̈͠_҈̧͍̤̦̯͛̀͝_̵̪̮͈͇̂̚͢͡_҉̧͚̩҇̂̓́_̴̡̠̩̝̫́͌͡_̷̭̝̟̇̂̃̈́̄͢͡'],
+			'Или прокатиться на велосипеде.',
+			'Ладно, время обеда. А сегодня в столовой соляночка.',
+		].map((line) => {
+			if (typeof line === 'string') return { speaker: PLAYER_NAME, text: line, voice: 'player' as const };
+			const [text, glitch] = line;
+			return { speaker: PLAYER_NAME, text, glitch, noSkip: true, voice: 'player' as const };
+		}),
+	};
 	/** Окно с видом на улицу — для портала (см. WindowPortal): «вправо» для смотрящего наружу и «наружу» — на запад. */
 	readonly viewWindow: PortalFrame = {
 		center: new THREE.Vector3(WINDOW_X + 0.005, WINDOW_Y, WINDOW_VIEW_Z),
@@ -136,6 +154,11 @@ export class Room {
 
 	get isDoorOpen(): boolean {
 		return this.doorOpenState;
+	}
+
+	/** Задача в офисе (после вступления) — выйти на улицу; маркер — над дверью. */
+	get objective(): { text: string; at: THREE.Vector3 } {
+		return { text: 'Выйди из офиса', at: new THREE.Vector3(this.doorway.wallX, DOOR_HEIGHT + 0.3, this.doorway.z) };
 	}
 
 	/** windowView — картинка улицы для окна (текстура портала). */

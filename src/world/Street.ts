@@ -3,7 +3,7 @@ import type { CircleColliders } from '../physics/CircleColliders.js';
 import { Rain } from './Rain.js';
 import type { PortalFrame } from '../render/WindowPortal.js';
 import { Sky, SKY_HORIZON, SUN_DIRECTION } from './Sky.js';
-import { SwingLeaf } from './CanteenProps.js';
+import { SwingLeaf, CANTEEN_DOOR_HEIGHT } from './CanteenProps.js';
 import { createPanelBuilding, createCanteen, createYardRoadTexture, PANEL_BUILDING_DEPTH, CANTEEN_SIZE } from './Buildings.js';
 import {
 	createBench,
@@ -134,9 +134,20 @@ export class Street {
 	private gateAnimTo = this.gateClosedRot;
 	private gateAnimT = 1;
 	private gateColliders: { x: number; z: number; radius: number }[] = [];
+	/** Игрок уже выходил за забор двора (дальше задача — добраться до столовой). */
+	private leftYard = false;
 
 	get isGateOpen(): boolean {
 		return this.gateOpenState;
+	}
+
+	/** Задача на улице: сначала выйти из двора (маркер на калитке), потом — дойти до столовой (маркер на её двери).
+	 * player — где игрок: как только он за забором, считаем, что двор покинут. */
+	objective(player: THREE.Vector3): { text: string; at: THREE.Vector3 } {
+		const inYard = player.x > YARD_MIN_X && player.x < YARD_MAX_X && player.z > YARD_MIN_Z && player.z < YARD_MAX_Z;
+		if (!inYard) this.leftYard = true;
+		if (!this.leftYard) return { text: 'Выйди из двора', at: new THREE.Vector3(this.gate.x, FENCE_HEIGHT + 0.4, this.gate.z) };
+		return { text: 'Доберись до столовой', at: new THREE.Vector3(this.canteenDoor.x, CANTEEN_DOOR_HEIGHT + 0.6, this.canteenDoor.z) };
 	}
 
 	constructor(private readonly colliders: CircleColliders) {

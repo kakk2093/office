@@ -18,6 +18,8 @@ uniform float levels;
 uniform float outlineStrength;
 uniform float vignetteStrength;
 uniform float motionBlur;
+uniform float glitch;
+uniform float glitchSeed;
 varying vec2 vUv;
 
 // Матрица Байера 4x4 для упорядоченного дизеринга.
@@ -53,8 +55,28 @@ vec3 sampleColor(vec2 uv) {
 	return sum / float(BLUR_SAMPLES);
 }
 
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+// Сбой картинки: часть горизонтальных полос сдвинута вбок, каналы цвета разъехались, кое-где — блоки «битого» цвета.
+vec3 glitchColor(vec2 uv) {
+	float band = floor(uv.y * 28.0);
+	float r = hash(vec2(band, glitchSeed));
+	if (r < 0.45 * glitch) uv.x += (hash(vec2(band, glitchSeed + 7.0)) - 0.5) * 0.25 * glitch;
+	float split = 0.012 * glitch * (hash(vec2(glitchSeed, 3.0)) + 0.3);
+	vec3 color = vec3(
+		texture2D(tColor, uv + vec2(split, 0.0)).r,
+		texture2D(tColor, uv).g,
+		texture2D(tColor, uv - vec2(split, 0.0)).b
+	);
+	vec2 block = floor(uv * vec2(16.0, 10.0));
+	if (hash(block + glitchSeed) < 0.06 * glitch) color = vec3(1.0) - color;
+	return color;
+}
+
 void main() {
-	vec3 color = sampleColor(vUv);
+	vec3 color = glitch > 0.001 ? glitchColor(vUv) : sampleColor(vUv);
 
 	// Контур: пиксель дальше соседа и в глубине есть излом (край объекта), а не гладкий склон.
 	vec2 px = 1.0 / resolution;
@@ -128,6 +150,8 @@ export class PostProcess {
 				outlineStrength: { value: outline },
 				vignetteStrength: { value: vignette },
 				motionBlur: { value: 0 },
+				glitch: { value: 0 },
+				glitchSeed: { value: 0 },
 			},
 		});
 		this.quadScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material));
@@ -142,6 +166,12 @@ export class PostProcess {
 	/** 0..1 — радиальное размытие по краям кадра (ускорение). */
 	setMotionBlur(amount: number): void {
 		this.material.uniforms.motionBlur.value = amount;
+	}
+
+	/** 0..1 — сбой картинки; seed меняется каждый кадр, чтобы полосы и блоки прыгали. */
+	setGlitch(amount: number, seed: number): void {
+		this.material.uniforms.glitch.value = amount;
+		this.material.uniforms.glitchSeed.value = seed;
 	}
 
 	render(scene: THREE.Scene, camera: THREE.PerspectiveCamera): void {

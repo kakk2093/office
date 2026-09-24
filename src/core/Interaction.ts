@@ -1,6 +1,9 @@
 /** Звуки действий: их играет Game (через Sfx), сами места о звуке не знают. */
 export type InteractionSound = 'tray' | 'bread' | 'dish' | 'card';
 
+/** Имя героя в окне диалога: его имени игра не называет. */
+export const PLAYER_NAME = '???';
+
 /** Чьим голосом «говорит» реплика — от этого зависит писк при печати текста. */
 export type Voice = 'dinnerLady' | 'cashier' | 'player';
 
@@ -8,6 +11,10 @@ export interface DialogueLine {
 	speaker: string;
 	text: string;
 	voice: Voice;
+	/** Хвост реплики, который после напечатанного text появляется разом — со сбоем картинки и звука. */
+	glitch?: string;
+	/** Не допечатывать по ЛКМ: реплику можно только дождаться. */
+	noSkip?: boolean;
 }
 
 /** Разговор: реплики по очереди, onEnd — когда игрок закрыл последнюю. */

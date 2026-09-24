@@ -1,4 +1,5 @@
 import type { Dialogue, InteractionSound, Voice } from '../core/Interaction.js';
+import { LETTERBOX_HEIGHT } from './Letterbox.js';
 
 /** Скорость печати, символов в секунду. */
 const CHARS_PER_SECOND = 28;
@@ -7,9 +8,11 @@ const PUNCTUATION_PAUSE = 0.18;
 const ACCENT = '#e3b25a';
 
 /**
- * Окно диалога внизу экрана: подложка, имя говорящего и текст с эффектом печатной машинки;
- * в углу — «ЛКМ ▶» (тусклая, пока реплика печатается; мигает, когда допечатана).
+ * Реплики диалога — прямо на нижней чёрной полосе кинорамки (Letterbox, её выдвигает Game), без окна:
+ * имя говорящего и текст с эффектом печатной машинки; в углу — «ЛКМ ▶» (тусклая, пока реплика печатается;
+ * мигает, когда допечатана).
  * onBlip — на каждую вторую напечатанную букву: Game играет писк голоса говорящего.
+ * У реплики с glitch хвост появляется разом, когда text допечатан, — и вызывается onGlitch (сбой картинки и звука).
  */
 export class DialogueBox {
 	private readonly root = document.createElement('div');
@@ -20,9 +23,14 @@ export class DialogueBox {
 	private lineIndex = 0;
 	/** Сколько символов текущей реплики уже напечатано (дробное — копится по времени). */
 	private shown = 0;
+	/** Хвост-глитч текущей реплики уже показан. */
+	private glitchShown = false;
 	private pause = 0;
+	/** Сколько ещё ждать перед первой репликой (пока выезжает кинорамка), с. */
+	private delay = 0;
 	private time = 0;
 	onBlip: ((voice: Voice) => void) | null = null;
+	onGlitch: (() => void) | null = null;
 	/** Разговор закончен — Game играет его endSound. */
 	onEnd: ((sound: InteractionSound | undefined) => void) | null = null;
 
@@ -30,15 +38,14 @@ export class DialogueBox {
 		Object.assign(this.root.style, {
 			position: 'fixed',
 			left: '50%',
-			bottom: '24px',
+			bottom: '0',
 			transform: 'translateX(-50%)',
 			width: 'min(860px, 92vw)',
-			minHeight: '96px',
+			minHeight: LETTERBOX_HEIGHT,
 			boxSizing: 'border-box',
-			padding: '14px 20px 30px',
-			background: 'rgba(22, 8, 10, 0.88)',
-			border: `2px solid ${ACCENT}`,
-			borderRadius: '8px',
+			padding: '10px 20px 26px',
+			flexDirection: 'column',
+			justifyContent: 'center',
 			color: '#f1e8d6',
 			font: '20px/1.4 system-ui, sans-serif',
 			textShadow: '0 1px 2px rgba(0, 0, 0, 0.8)',
@@ -65,27 +72,33 @@ export class DialogueBox {
 		return this.dialogue !== null;
 	}
 
-	start(dialogue: Dialogue): void {
+	/** delay — через сколько секунд показать первую реплику (например, когда кинорамка доедет до места). */
+	start(dialogue: Dialogue, delay = 0): void {
 		this.dialogue = dialogue;
 		this.lineIndex = 0;
 		this.shown = 0;
+		this.glitchShown = false;
 		this.pause = 0;
-		this.root.style.display = 'block';
+		this.delay = delay;
+		this.root.style.display = delay > 0 ? 'none' : 'flex';
 		this._render();
 	}
 
-	/** ЛКМ: если реплика ещё печатается — допечатать сразу; иначе — следующая реплика или конец разговора. */
+	/** ЛКМ: если реплика ещё печатается — допечатать сразу (кроме noSkip); иначе — следующая реплика или конец разговора. */
 	advance(): void {
 		const dialogue = this.dialogue;
-		if (!dialogue) return;
-		const text = dialogue.lines[this.lineIndex].text;
+		if (!dialogue || this.delay > 0) return;
+		const { text, noSkip } = dialogue.lines[this.lineIndex];
 		if (this.shown < text.length) {
+			if (noSkip) return;
 			this.shown = text.length;
+			this._revealGlitch();
 			this._render();
 			return;
 		}
 		this.lineIndex++;
 		this.shown = 0;
+		this.glitchShown = false;
 		this.pause = 0;
 		if (this.lineIndex >= dialogue.lines.length) {
 			this.dialogue = null;
@@ -99,6 +112,11 @@ export class DialogueBox {
 
 	update(dt: number): void {
 		if (!this.dialogue) return;
+		if (this.delay > 0) {
+			this.delay -= dt;
+			if (this.delay > 0) return;
+			this.root.style.display = 'flex';
+		}
 		this.time += dt;
 		const line = this.dialogue.lines[this.lineIndex];
 		if (this.shown < line.text.length) {
@@ -120,14 +138,23 @@ export class DialogueBox {
 				}
 			}
 		}
+		if (this.shown >= line.text.length) this._revealGlitch();
 		this._render();
+	}
+
+	/** Текст допечатан — хвост-глитч (если есть) появляется разом, один раз. */
+	private _revealGlitch(): void {
+		const line = this.dialogue?.lines[this.lineIndex];
+		if (!line?.glitch || this.glitchShown) return;
+		this.glitchShown = true;
+		this.onGlitch?.();
 	}
 
 	private _render(): void {
 		if (!this.dialogue) return;
 		const line = this.dialogue.lines[this.lineIndex];
 		if (this.speaker.textContent !== line.speaker) this.speaker.textContent = line.speaker;
-		const visible = line.text.slice(0, Math.floor(this.shown));
+		const visible = line.text.slice(0, Math.floor(this.shown)) + (this.glitchShown ? (line.glitch ?? '') : '');
 		if (this.text.textContent !== visible) this.text.textContent = visible;
 		const done = this.shown >= line.text.length;
 		this.hint.style.opacity = done && Math.floor(this.time * 2.5) % 2 === 0 ? '1' : '0.35';

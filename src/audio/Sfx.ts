@@ -339,6 +339,48 @@ export class Sfx {
 		screech.start(t);
 	}
 
+	/**
+	 * Цифровой сбой: серия рваных кусочков по 15–50 мс — то «раскрошенный» шум (значение держится по несколько
+	 * сэмплов, как при низкой разрядности), то квадратный писк случайной высоты, с резкими обрывами.
+	 */
+	glitch(duration = 0.4): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		let t = ctx.currentTime + 0.01;
+		const end = t + duration;
+		while (t < end) {
+			const piece = 0.015 + Math.random() * 0.035;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime((0.18 + Math.random() * 0.2) / 3, t);
+			gain.gain.setValueAtTime(0, t + piece);
+			gain.connect(ctx.destination);
+			if (Math.random() < 0.55) {
+				const length = Math.max(1, Math.floor(ctx.sampleRate * piece));
+				const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+				const data = buffer.getChannelData(0);
+				const hold = 6 + Math.floor(Math.random() * 40);
+				let value = 0;
+				for (let i = 0; i < length; i++) {
+					if (i % hold === 0) value = Math.random() < 0.5 ? -1 : 1;
+					data[i] = value;
+				}
+				const crunch = ctx.createBufferSource();
+				crunch.buffer = buffer;
+				crunch.connect(gain);
+				crunch.start(t);
+			} else {
+				const osc = ctx.createOscillator();
+				osc.type = 'square';
+				osc.frequency.setValueAtTime(80 + Math.random() * 1900, t);
+				osc.connect(gain);
+				osc.start(t);
+				osc.stop(t + piece);
+			}
+			// Иногда — провал тишины между кусками.
+			t += piece + (Math.random() < 0.25 ? 0.02 + Math.random() * 0.03 : 0);
+		}
+	}
+
 	/** Кусок хлеба кладут на поднос: мягкий короткий шорох. */
 	bread(): void {
 		const ctx = this._context();

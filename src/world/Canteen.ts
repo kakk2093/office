@@ -50,7 +50,7 @@ import {
 	type DrinkKind,
 } from './CanteenProps.js';
 import { DinnerLady, Cashier } from './People.js';
-import type { Interaction, Seat, CameraPose } from '../core/Interaction.js';
+import { PLAYER_NAME, type Interaction, type Seat, type CameraPose } from '../core/Interaction.js';
 
 /**
  * Столовая изнутри — отдельная сцена, как офис. Вход с юга (+Z); за входом зал: 12 столов в два ряда
@@ -440,9 +440,9 @@ export class Canteen {
 			dialogue: {
 				lines: [
 					{ speaker: 'Раздатчица', text: 'Чего тебе?', voice: 'dinnerLady' },
-					{ speaker: 'Я', text: 'Солянку целую.', voice: 'player' },
+					{ speaker: PLAYER_NAME, text: 'Солянку целую.', voice: 'player' },
 					{ speaker: 'Раздатчица', text: 'С собой что-то будет?', voice: 'dinnerLady' },
-					{ speaker: 'Я', text: 'Нет.', voice: 'player' },
+					{ speaker: PLAYER_NAME, text: 'Нет.', voice: 'player' },
 				],
 				onEnd: () => {
 					this.soupOrdered = true;
@@ -574,7 +574,7 @@ export class Canteen {
 			dialogue: {
 				lines: [
 					{ speaker: 'Кассир', text: 'Так, солянка целая, 2 хлеба. С вас 126 рублей.', voice: 'cashier' },
-					{ speaker: 'Я', text: 'Картой.', voice: 'player' },
+					{ speaker: PLAYER_NAME, text: 'Картой.', voice: 'player' },
 				],
 				endSound: 'card',
 				onEnd: () => {
