@@ -33,7 +33,7 @@ const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, play
 /** За сколько секунд затихает музыка, пока игрок доедает солянку. */
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
-const DEBUG_START_AT_CANTEEN = true;
+const DEBUG_START_AT_CANTEEN = false;
 /** Граница уличного плейна, за которую не пускаем камеру. */
 const STREET_HALF = 74;
 
