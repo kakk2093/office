@@ -261,6 +261,9 @@ export class Street {
 		const cellH = h / FLOORS;
 		ctx.fillStyle = '#3c4b52';
 		for (let floor = 0; floor < FLOORS; floor++) {
+			// Не рисуем окна у самой земли (не знаем точно, какой край текстуры — верх/низ фасада из-за flipY,
+			// поэтому пропускаем оба крайних ряда) — там вход и чёрная дверь, окна поверх них смотрелись бы криво.
+			if (floor === 0 || floor === FLOORS - 1) continue;
 			for (let col = 0; col < cols; col++) {
 				const x = col * cellW + cellW * 0.2;
 				const y = floor * cellH + cellH * 0.25;
