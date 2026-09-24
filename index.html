@@ -12,10 +12,21 @@
 			color: #fff; font: 500 18px system-ui, sans-serif; background: rgba(0, 0, 0, 0.35);
 			pointer-events: none;
 		}
+		#prompt {
+			position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%);
+			display: none;
+			color: #fff; font: 600 16px system-ui, sans-serif; background: rgba(0, 0, 0, 0.55);
+			padding: 6px 14px; border-radius: 4px; pointer-events: none;
+		}
+		#flash {
+			position: fixed; inset: 0; opacity: 0; pointer-events: none;
+		}
 	</style>
 </head>
 <body>
 	<div id="hint">Кликни, чтобы осмотреться</div>
+	<div id="prompt"></div>
+	<div id="flash"></div>
 	<script type="module" src="/src/main.ts"></script>
 </body>
 </html>

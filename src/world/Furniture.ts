@@ -71,6 +71,21 @@ export function createMouse(): THREE.Mesh {
 	return mouse;
 }
 
+/** Дверь: полотно + ручка. Начало координат группы — на петле (край полотна), не в центре —
+ * так группу можно крутить на месте для анимации открытия. */
+export function createDoor(width = 1.0, height = 2.1): THREE.Group {
+	const group = new THREE.Group();
+	const slab = new THREE.Mesh(new THREE.BoxGeometry(width, height, 0.06), new THREE.MeshStandardMaterial({ color: '#5a4632' }));
+	slab.position.set(width / 2, height / 2, 0);
+	slab.castShadow = true;
+	group.add(slab);
+
+	const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.08), new THREE.MeshStandardMaterial({ color: '#d8d2c4' }));
+	handle.position.set(width - 0.1, height / 2, 0.06);
+	group.add(handle);
+	return group;
+}
+
 export function createAcUnit(): THREE.Mesh {
 	const ac = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.3, 0.22), new THREE.MeshStandardMaterial({ color: '#f4f4f2' }));
 	ac.castShadow = true;

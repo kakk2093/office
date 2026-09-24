@@ -9,8 +9,8 @@ const RADIUS = 0.35;
 const GRAVITY = 20;
 const JUMP_SPEED = 7;
 /** Пройденный по земле путь между шагами, м: шагом — короче, бегом — шире. */
-const STEP_LENGTH = 0.7;
-const SPRINT_STEP_LENGTH = 1.1;
+const STEP_LENGTH = 1.1;
+const SPRINT_STEP_LENGTH = 1.6;
 /** Максимальный спуск за кадр, при котором игрок «прилипает» к земле, а не падает. */
 const STEP_DOWN = 0.5;
 const MOUSE_SENSITIVITY = 0.002;
@@ -37,7 +37,8 @@ export class PlayerController {
 		private readonly camera: THREE.PerspectiveCamera,
 		private readonly input: Input,
 		private readonly ground: Ground,
-		private readonly colliders: CircleColliders
+		/** Не readonly: при смене сцены (офис/улица) Game подставляет свой набор коллайдеров. */
+		public colliders: CircleColliders
 	) {
 		this.camera.rotation.order = 'YXZ';
 	}
