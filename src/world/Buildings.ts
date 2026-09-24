@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createCanteenDoor, CANTEEN_DOOR_WIDTH, CANTEEN_DOOR_HEIGHT } from './CanteenProps.js';
 
 /** Низкополи-здания района вокруг двора: панельные пятиэтажки и столовая «Спутник». */
 
@@ -244,9 +245,13 @@ function createCanteenSignTexture(): THREE.CanvasTexture {
 	return pixelTexture(canvas);
 }
 
+/** Верх второй ступени крыльца — на нём стоит входная дверь. */
+const CANTEEN_PORCH_Y = 0.32;
+
 /** Столовая «Спутник»: белая двухэтажная модернистская коробка, ленточные окна, козырёк над входом,
- * буквы вывески на крыше и спутник-эмблема. Фасад — +Z, ширина вдоль X. Начало координат — центр основания. */
-export function createCanteen(): THREE.Group {
+ * буквы вывески на крыше и спутник-эмблема. Фасад — +Z, ширина вдоль X. Начало координат — центр основания.
+ * doorLeaf — открывающаяся створка входной двери (её крутит Street). */
+export function createCanteen(): { group: THREE.Group; doorLeaf: THREE.Group } {
 	const group = new THREE.Group();
 	const width = 22;
 	const depth = 12;
@@ -275,17 +280,36 @@ export function createCanteen(): THREE.Group {
 		band.position.set(0, y, front + 0.03);
 		group.add(band);
 	}
+	// Рёбра не заходят на портал входа.
+	const portalHalf = CANTEEN_DOOR_WIDTH / 2 + 0.5;
 	for (let x = -width / 2 + 0.8; x <= width / 2 - 0.8 + 0.01; x += 1.9) {
+		if (Math.abs(x) < portalHalf + 0.1) continue;
 		const fin = new THREE.Mesh(new THREE.BoxGeometry(0.18, height - 1.0, 0.25), white);
 		fin.position.set(x, height / 2, front + 0.12);
 		fin.castShadow = true;
 		group.add(fin);
 	}
 
-	// Вход: двери по центру, широкий козырёк на двух тонких столбах, ступени.
-	const door = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.4, 0.08), new THREE.MeshStandardMaterial({ color: '#2f3336' }));
-	door.position.set(0, 1.2, front + 0.3);
-	group.add(door);
+	// Вход: портал из светлой плитки вокруг двустворчатой двери в алюминиевой раме, над ним козырёк.
+	const portal = new THREE.Mesh(
+		new THREE.BoxGeometry(portalHalf * 2, CANTEEN_PORCH_Y + CANTEEN_DOOR_HEIGHT + 0.35, 0.12),
+		new THREE.MeshStandardMaterial({ color: '#d9d5ca' })
+	);
+	portal.position.set(0, (CANTEEN_PORCH_Y + CANTEEN_DOOR_HEIGHT + 0.35) / 2, front + 0.06);
+	portal.receiveShadow = true;
+	group.add(portal);
+	// Сквозь стекло — тёплый свет зала.
+	const doorGlass = new THREE.MeshStandardMaterial({
+		color: '#2c353b',
+		roughness: 0.1,
+		metalness: 0.4,
+		emissive: '#3d3a30',
+		emissiveIntensity: 0.3,
+		side: THREE.DoubleSide,
+	});
+	const door = createCanteenDoor(doorGlass, true);
+	door.group.position.set(0, CANTEEN_PORCH_Y, front + 0.17);
+	group.add(door.group);
 	const canopy = new THREE.Mesh(new THREE.BoxGeometry(7, 0.22, 3), white);
 	canopy.position.set(0, 3.6, front + 1.5);
 	canopy.castShadow = true;
@@ -348,7 +372,7 @@ export function createCanteen(): THREE.Group {
 	}
 	sputnik.rotation.set(-0.3, 0.6, 0);
 	group.add(sputnik);
-	return group;
+	return { group, doorLeaf: door.leaf };
 }
 
 export const CANTEEN_SIZE = { width: 22, depth: 12 } as const;

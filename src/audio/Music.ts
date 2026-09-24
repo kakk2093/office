@@ -57,6 +57,24 @@ export class Music {
 		}
 	}
 
+	/** Плавно заглушить музыку за seconds секунд и остановить (аккорды и перкуссию). */
+	fadeOut(seconds: number): void {
+		if (!this.ctx || !this.master) {
+			this.stop();
+			this.setPercussion(false);
+			return;
+		}
+		const gain = this.master.gain;
+		const t = this.ctx.currentTime;
+		gain.cancelScheduledValues(t);
+		gain.setValueAtTime(gain.value, t);
+		gain.linearRampToValueAtTime(0.0001, t + seconds);
+		window.setTimeout(() => {
+			this.stop();
+			this.setPercussion(false);
+		}, seconds * 1000);
+	}
+
 	/** Включить/выключить перкуссию поверх аккордов (например, при выходе на улицу). */
 	setPercussion(on: boolean): void {
 		if (on === this.percussionOn) return;

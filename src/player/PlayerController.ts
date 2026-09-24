@@ -31,6 +31,8 @@ export class PlayerController {
 	/** Направление взгляда в плоскости XZ (нормированное). */
 	readonly forward = new THREE.Vector3(0, 0, -1);
 	private stepDistance = 0;
+	/** Высота глаз сидя; null — стоим. Сидя камера неподвижна: взгляд — на стол, пока не встанешь. */
+	private seatedEyeY: number | null = null;
 	private readonly move = new THREE.Vector3();
 
 	constructor(
@@ -54,8 +56,37 @@ export class PlayerController {
 		this._applyRotation();
 	}
 
+	/** Сесть: камера над табуреткой на высоте eyeY, взгляд — по yaw и чуть вниз, на стол. */
+	sit(x: number, z: number, yaw: number, eyeY: number): void {
+		this.camera.position.set(x, eyeY, z);
+		this.seatedEyeY = eyeY;
+		this.yaw = yaw;
+		this.pitch = -0.45;
+		this.velocityY = 0;
+		this.grounded = true;
+		this._applyRotation();
+	}
+
+	/** Катсцена: поставить глаза и взгляд напрямую (сидя — мышь и ходьба и так не работают). */
+	setPose(x: number, y: number, z: number, yaw: number, pitch: number): void {
+		this.camera.position.set(x, y, z);
+		this.yaw = yaw;
+		this.pitch = pitch;
+		this._applyRotation();
+	}
+
+	/** Встать в точке (x, z), взгляд — прежний. */
+	stand(x: number, z: number): void {
+		this.seatedEyeY = null;
+		const pitch = this.pitch;
+		this.spawn(x, z, this.yaw);
+		this.pitch = pitch;
+		this._applyRotation();
+	}
+
 	update(dt: number): void {
 		this._updateLook();
+		if (this.seatedEyeY !== null) return;
 		this._updateMovement(dt);
 		this._updateVertical(dt);
 	}
@@ -104,6 +135,8 @@ export class PlayerController {
 
 	private _updateLook(): void {
 		const mouse = this.input.consumeMouseDelta();
+		// Сидя мышь не поворачивает камеру (движение сбрасываем, чтобы не было рывка, когда встанешь).
+		if (this.seatedEyeY !== null) return;
 		this.yaw -= mouse.x * MOUSE_SENSITIVITY;
 		this.pitch -= mouse.y * MOUSE_SENSITIVITY;
 		this.pitch = THREE.MathUtils.clamp(this.pitch, -MAX_PITCH, MAX_PITCH);

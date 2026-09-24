@@ -44,6 +44,149 @@ export class Sfx {
 		noise.stop(ctx.currentTime + duration);
 	}
 
+	/** Поднос снимают со стопки: сухой пластиковый стук о соседний и лёгкий шорох. */
+	tray(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		for (const [delay, freq, level] of [
+			[0, 1500, 0.22],
+			[0.07, 1100, 0.12],
+		] as const) {
+			const click = this._noiseBurst(0.025);
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.frequency.value = freq;
+			band.Q.value = 3;
+			const gain = ctx.createGain();
+			gain.gain.value = level;
+			click.connect(band);
+			band.connect(gain);
+			gain.connect(ctx.destination);
+			click.start(t + delay);
+		}
+		this._soft(t + 0.02, 0.18, 2400, 0.03);
+	}
+
+	/**
+	 * Писк голоса при печати реплики (как в старых играх): короткий «слог» — пилообразный тон
+	 * через полосовой фильтр-«гласную». Высота и гласная слегка случайны, чтобы звучало как речь.
+	 */
+	voice(pitch: number): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.005;
+		const duration = 0.065;
+		const osc = ctx.createOscillator();
+		osc.type = 'sawtooth';
+		const f = pitch * (0.88 + Math.random() * 0.3);
+		osc.frequency.setValueAtTime(f, t);
+		osc.frequency.linearRampToValueAtTime(f * (0.92 + Math.random() * 0.12), t + duration);
+		const vowel = ctx.createBiquadFilter();
+		vowel.type = 'bandpass';
+		vowel.frequency.value = 700 + Math.random() * 900;
+		vowel.Q.value = 2.5;
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(0.0001, t);
+		gain.gain.linearRampToValueAtTime(0.09, t + 0.008);
+		gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+		osc.connect(vowel);
+		vowel.connect(gain);
+		gain.connect(ctx.destination);
+		osc.start(t);
+		osc.stop(t + duration + 0.02);
+	}
+
+	/** Ложка супа: звяк ложки о край тарелки и хлюпанье, когда ложка у рта (через slurpDelay с). */
+	eat(slurpDelay: number): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+		const clink = this._noiseBurst(0.012);
+		const ring = ctx.createBiquadFilter();
+		ring.type = 'bandpass';
+		ring.frequency.value = 3400 + Math.random() * 400;
+		ring.Q.value = 20;
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(0.25, t);
+		gain.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+		clink.connect(ring);
+		ring.connect(gain);
+		gain.connect(ctx.destination);
+		clink.start(t);
+		this._soft(t + slurpDelay, 0.2, 700, 0.07);
+	}
+
+	/** Оплата картой: терминал коротко пищит дважды. */
+	card(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+		for (const delay of [0, 0.14]) {
+			const osc = ctx.createOscillator();
+			osc.type = 'square';
+			osc.frequency.value = 2100;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(0.0001, t + delay);
+			gain.gain.linearRampToValueAtTime(0.05, t + delay + 0.005);
+			gain.gain.setValueAtTime(0.05, t + delay + 0.08);
+			gain.gain.linearRampToValueAtTime(0.0001, t + delay + 0.09);
+			osc.connect(gain);
+			gain.connect(ctx.destination);
+			osc.start(t + delay);
+			osc.stop(t + delay + 0.1);
+		}
+	}
+
+	/** Фаянсовую тарелку ставят на поднос: короткий звонкий стук. */
+	dish(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		const hit = this._noiseBurst(0.02);
+		for (const [freq, level, decay] of [
+			[2600, 0.35, 0.09],
+			[4100, 0.2, 0.06],
+		] as const) {
+			const ring = ctx.createBiquadFilter();
+			ring.type = 'bandpass';
+			ring.frequency.value = freq;
+			ring.Q.value = 18;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(level, t);
+			gain.gain.exponentialRampToValueAtTime(0.001, t + decay);
+			hit.connect(ring);
+			ring.connect(gain);
+			gain.connect(ctx.destination);
+		}
+		hit.start(t);
+		this._soft(t, 0.05, 600, 0.08);
+	}
+
+	/** Кусок хлеба кладут на поднос: мягкий короткий шорох. */
+	bread(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		this._soft(ctx.currentTime + 0.01, 0.12, 900, 0.09);
+	}
+
+	/** Мягкий шум с плавной атакой и спадом через lowpass — шорох, касание. */
+	private _soft(start: number, duration: number, cutoff: number, level: number): void {
+		const ctx = this._context();
+		const noise = this._noiseBurst(duration);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = cutoff;
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(0.0001, start);
+		gain.gain.linearRampToValueAtTime(level, start + duration * 0.3);
+		gain.gain.linearRampToValueAtTime(0.0001, start + duration);
+		noise.connect(low);
+		low.connect(gain);
+		gain.connect(ctx.destination);
+		noise.start(start);
+	}
+
 	/**
 	 * Железная калитка: при открытии сухой щелчок щеколды и скрип петель, при закрытии — скрип и глухой стук
 	 * о столб с коротким металлическим отзвуком. Всё из шума и резонансных фильтров — без «синтезаторных» тонов.

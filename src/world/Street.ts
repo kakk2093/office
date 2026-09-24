@@ -3,6 +3,7 @@ import type { CircleColliders } from '../physics/CircleColliders.js';
 import { Rain } from './Rain.js';
 import type { PortalFrame } from '../render/WindowPortal.js';
 import { Sky, SKY_HORIZON, SUN_DIRECTION } from './Sky.js';
+import { SwingLeaf } from './CanteenProps.js';
 import { createPanelBuilding, createCanteen, createYardRoadTexture, PANEL_BUILDING_DEPTH, CANTEEN_SIZE } from './Buildings.js';
 import {
 	createBench,
@@ -72,6 +73,9 @@ const ROAD_WIDTH = ROAD_Z2 - ROAD_Z1;
 const TURN_X1 = ROAD_X2 - ROAD_WIDTH;
 const TURN_Z2 = 58;
 const CANTEEN_Z = TURN_Z2 + 6;
+const CANTEEN_X = (TURN_X1 + ROAD_X2) / 2;
+/** Входная дверь столовой: фасад смотрит на север, дверь стоит на крыльце чуть перед стеной. */
+const CANTEEN_DOOR_Z = CANTEEN_Z - CANTEEN_SIZE.depth / 2 - 0.17;
 /** Площадь перед столовой — с этого Z дома у поворота заканчиваются, и столовая видна целиком, вместе с вывеской. */
 const PLAZA_Z1 = 46;
 /** Бетонный забор по периметру района — дальше игрок не уходит (внутри клэмпа STREET_HALF в Game, с запасом вокруг домов). */
@@ -113,6 +117,11 @@ export class Street {
 	};
 	/** Калитка в заборе — со стороны спавна. */
 	readonly gate: GatePoint = { x: 0, z: YARD_MAX_Z };
+	/** Вход в столовую — у него подсказка «войти». */
+	readonly canteenDoor: GatePoint = { x: CANTEEN_X, z: CANTEEN_DOOR_Z };
+	/** Куда ставим игрока, вышедшего из столовой: на крыльце, спиной к двери (yaw 0 — взгляд на север). */
+	readonly canteenExit = { x: CANTEEN_X, z: CANTEEN_DOOR_Z - 1.8, yaw: 0 };
+	private canteenDoorLeaf: SwingLeaf | null = null;
 	private readonly rain = new Rain();
 	private readonly sky = new Sky();
 	/** Начало координат полотна калитки — на петле (см. createGate): анимация — поворот группы. */
@@ -163,11 +172,22 @@ export class Street {
 	update(dt: number, cameraPosition: THREE.Vector3): void {
 		this.rain.update(dt, cameraPosition);
 		this.sky.update(dt, cameraPosition);
+		this.canteenDoorLeaf?.update(dt);
 		if (this.gateAnimT < 1) {
 			this.gateAnimT = Math.min(1, this.gateAnimT + dt / GATE_ANIM_TIME);
 			const eased = 1 - (1 - this.gateAnimT) ** 3;
 			this.gateLeaf.rotation.y = THREE.MathUtils.lerp(this.gateAnimFrom, this.gateAnimTo, eased);
 		}
+	}
+
+	/** Открыть створку двери столовой (при входе; дальше переход прячет смену сцены). */
+	openCanteenDoor(): void {
+		this.canteenDoorLeaf?.open();
+	}
+
+	/** Закрыть створку мгновенно — когда игрок возвращается на улицу. */
+	resetCanteenDoor(): void {
+		this.canteenDoorLeaf?.reset();
 	}
 
 	/** E у калитки: переключает открыто/закрыто, полотно плавно поворачивается на петле; коллайдер снимается/ставится. */
@@ -233,10 +253,11 @@ export class Street {
 		this._buildDistrictProps();
 
 		const canteen = createCanteen();
-		canteen.position.set((TURN_X1 + ROAD_X2) / 2, 0, CANTEEN_Z);
-		canteen.rotation.y = Math.PI; // фасадом на север — к дороге
-		this.scene.add(canteen);
-		this._rectColliders((TURN_X1 + ROAD_X2) / 2, CANTEEN_Z, CANTEEN_SIZE.width, CANTEEN_SIZE.depth);
+		canteen.group.position.set(CANTEEN_X, 0, CANTEEN_Z);
+		canteen.group.rotation.y = Math.PI; // фасадом на север — к дороге
+		this.scene.add(canteen.group);
+		this.canteenDoorLeaf = new SwingLeaf(canteen.doorLeaf, 1.3);
+		this._rectColliders(CANTEEN_X, CANTEEN_Z, CANTEEN_SIZE.width, CANTEEN_SIZE.depth);
 	}
 
 	/** Асфальт дороги, тротуары и площадки, бордюры. */
