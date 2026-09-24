@@ -40,6 +40,8 @@ const DEBUG_START_AT_CANTEEN = false;
 const GLITCH_TIME = 0.4;
 /** После «Старт» — столько секунд просто смотрим в окно (без управления), потом начинаются мысли героя. */
 const INTRO_DELAY = 1;
+/** После вступительного диалога — столько секунд без задачи, потом появляется первая («выйти из офиса»). */
+const FIRST_OBJECTIVE_DELAY = 4;
 /** Описание на стартовом экране. */
 const START_DESCRIPTION = [
 	'Очередной рабочий день. Ничего примечательного.',
@@ -90,6 +92,8 @@ export class Game {
 	private readonly startScreen = new StartScreen(START_DESCRIPTION);
 	/** Сколько ещё ждать до вступительного диалога после «Старт», с; null — не ждём. */
 	private introTimer: number | null = null;
+	/** Сколько ещё ждать до показа первой задачи после вступления, с; null — не ждём. */
+	private firstObjectiveTimer: number | null = null;
 	readonly room: Room;
 	readonly street: Street;
 	readonly canteen: Canteen;
@@ -181,8 +185,18 @@ export class Game {
 			this.introTimer -= dt;
 			if (this.introTimer <= 0) {
 				this.introTimer = null;
-				this._startDialogue({ ...this.room.intro, onEnd: () => (this.introPending = false) });
+				this._startDialogue({
+					...this.room.intro,
+					onEnd: () => {
+						this.introPending = false;
+						this.firstObjectiveTimer = FIRST_OBJECTIVE_DELAY;
+					},
+				});
 			}
+		}
+		if (this.firstObjectiveTimer !== null) {
+			this.firstObjectiveTimer -= dt;
+			if (this.firstObjectiveTimer <= 0) this.firstObjectiveTimer = null;
 		}
 
 		// Во время разговора стоим на месте; движение мыши сбрасываем, чтобы после не было рывка взгляда.
@@ -225,7 +239,7 @@ export class Game {
 		if (this.flashTime !== null) return null;
 		if (this.place === 'canteen') return this.canteen.objective;
 		if (this.place === 'street') return this.street.objective(this.camera.position);
-		return this.introPending ? null : this.room.objective;
+		return this.introPending || this.firstObjectiveTimer !== null ? null : this.room.objective;
 	}
 
 	private _scene(): THREE.Scene {
@@ -268,6 +282,8 @@ export class Game {
 		// За столом ЛКМ — ложка солянки; после MUSIC_FADE_BITE-й ложки музыка затихает.
 		if (this.place === 'canteen' && this.canteen.eating) {
 			this.prompt.textContent = 'ЛКМ — есть солянку';
+			// Пониже обычного — чтобы не закрывала тарелку.
+			this.prompt.classList.add('low');
 			this.prompt.style.display = 'block';
 			if (this.input.consumePress('Mouse0') && this.canteen.canEat) {
 				const bites = this.canteen.eat();
@@ -283,6 +299,7 @@ export class Game {
 		}
 		const usable = action.run || action.dialogue;
 		this.prompt.textContent = usable ? `E — ${action.text}` : action.text;
+		this.prompt.classList.remove('low');
 		this.prompt.style.display = 'block';
 		if (usable && this.input.consumePress('KeyE')) {
 			if (action.dialogue) this._startDialogue(action.dialogue);

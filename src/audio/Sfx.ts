@@ -351,7 +351,7 @@ export class Sfx {
 		while (t < end) {
 			const piece = 0.015 + Math.random() * 0.035;
 			const gain = ctx.createGain();
-			gain.gain.setValueAtTime((0.18 + Math.random() * 0.2) / 3, t);
+			gain.gain.setValueAtTime((0.18 + Math.random() * 0.2) / 4.5, t);
 			gain.gain.setValueAtTime(0, t + piece);
 			gain.connect(ctx.destination);
 			if (Math.random() < 0.55) {

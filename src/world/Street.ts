@@ -78,6 +78,10 @@ const CANTEEN_X = (TURN_X1 + ROAD_X2) / 2;
 const CANTEEN_DOOR_Z = CANTEEN_Z - CANTEEN_SIZE.depth / 2 - 0.17;
 /** Площадь перед столовой — с этого Z дома у поворота заканчиваются, и столовая видна целиком, вместе с вывеской. */
 const PLAZA_Z1 = 46;
+/** Автомат с водой у поворота — промежуточная точка маркера по пути к столовой. Высота — с цоколем. */
+const WATER_MACHINE_X = ROAD_X2 + 1.9;
+const WATER_MACHINE_Z = ROAD_Z1 + 1.5;
+const WATER_MACHINE_HEIGHT = 2.32;
 /** Бетонный забор по периметру района — дальше игрок не уходит (внутри клэмпа STREET_HALF в Game, с запасом вокруг домов). */
 const BOUNDARY_MIN_X = -56;
 const BOUNDARY_MAX_X = 66;
@@ -136,17 +140,24 @@ export class Street {
 	private gateColliders: { x: number; z: number; radius: number }[] = [];
 	/** Игрок уже выходил за забор двора (дальше задача — добраться до столовой). */
 	private leftYard = false;
+	/** Игрок дошёл по дороге до поворота (дальше маркер — сразу на двери столовой). */
+	private reachedTurn = false;
 
 	get isGateOpen(): boolean {
 		return this.gateOpenState;
 	}
 
-	/** Задача на улице: сначала выйти из двора (маркер на калитке), потом — дойти до столовой (маркер на её двери).
-	 * player — где игрок: как только он за забором, считаем, что двор покинут. */
+	/** Задача на улице: сначала выйти из двора (маркер на калитке), потом — дойти до столовой. Пока игрок не дошёл
+	 * до поворота, маркер висит над автоматом с водой — чтобы шёл налево по дороге, а не напрямик между домами;
+	 * у поворота маркер переходит на дверь столовой. player — где игрок: как только он за забором, двор покинут. */
 	objective(player: THREE.Vector3): { text: string; at: THREE.Vector3 } {
 		const inYard = player.x > YARD_MIN_X && player.x < YARD_MAX_X && player.z > YARD_MIN_Z && player.z < YARD_MAX_Z;
 		if (!inYard) this.leftYard = true;
+		if (player.x > TURN_X1 - 2) this.reachedTurn = true;
 		if (!this.leftYard) return { text: 'Выйди из двора', at: new THREE.Vector3(this.gate.x, FENCE_HEIGHT + 0.4, this.gate.z) };
+		if (!this.reachedTurn) {
+			return { text: 'Доберись до столовой', at: new THREE.Vector3(WATER_MACHINE_X, WATER_MACHINE_HEIGHT + 0.6, WATER_MACHINE_Z) };
+		}
 		return { text: 'Доберись до столовой', at: new THREE.Vector3(this.canteenDoor.x, CANTEEN_DOOR_HEIGHT + 0.6, this.canteenDoor.z) };
 	}
 
@@ -421,7 +432,7 @@ export class Street {
 		this._buildDumpsterSite(24.6, 10.8);
 
 		// Автомат с водой у поворота, лицом к дороге; рядом кто-то оставил пустую бутыль.
-		this._place(createWaterVendingMachine(), ROAD_X2 + 1.9, ROAD_Z1 + 1.5, -Math.PI / 2, [[0, 0, 0.8]]);
+		this._place(createWaterVendingMachine(), WATER_MACHINE_X, WATER_MACHINE_Z, -Math.PI / 2, [[0, 0, 0.8]]);
 		this._place(createWaterJug(), ROAD_X2 + 1.3, ROAD_Z1 + 0.3, 0);
 
 		for (const [x, z, w, d] of [

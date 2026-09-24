@@ -1,15 +1,20 @@
 const ACCENT = '#e3b25a';
 /** Сколько экран гаснет после «Старт», с. */
 const FADE_TIME = 0.6;
+/** Смена шагов стартового экрана (наушники → описание со «Старт»), с. */
+const STEP_FADE_TIME = 0.5;
 
 /**
- * Стартовый экран поверх игры: крупный мигающий совет надеть наушники, описание и кнопка «Старт» (или Enter).
- * Пока он открыт, игра стоит.
+ * Стартовый экран поверх игры в два шага. Сначала — только крупный мигающий совет надеть наушники и «нажми на экран»;
+ * по клику (или клавише) «нажми на экран» гаснет, совет остаётся, под ним появляются описание и кнопка «Старт»
+ * (или Enter). Пока экран открыт, игра стоит.
  * onStart вызывается внутри жеста пользователя — в нём можно захватить мышь и включить звук.
  */
 export class StartScreen {
 	private readonly root = document.createElement('div');
 	private started = false;
+	/** Первый шаг (наушники) пройден — видны описание и «Старт». */
+	private noticeDone = false;
 	onStart: (() => void) | null = null;
 
 	constructor(description: string[]) {
@@ -28,12 +33,33 @@ export class StartScreen {
 			font: '600 22px/1.6 system-ui, sans-serif',
 			textAlign: 'center',
 			zIndex: '10',
+			cursor: 'pointer',
 			transition: `opacity ${FADE_TIME}s ease`,
 		});
 		// Совет про наушники — крупно, цветом акцента и медленно пульсирует, чтобы бросался в глаза.
+		// Кнопка «Старт» при наведении темнеет: тёмный фон, текст и рамка — цветом акцента. Размер не меняется.
 		const style = document.createElement('style');
-		style.textContent = '@keyframes start-notice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }';
+		style.textContent = `
+			@keyframes start-notice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+			.start-button {
+				font: bold 20px system-ui, sans-serif;
+				color: #16080a;
+				background: ${ACCENT};
+				border: 2px solid ${ACCENT};
+				border-radius: 6px;
+				padding: 12px 48px;
+				cursor: pointer;
+			}
+			.start-button:hover, .start-button:focus-visible {
+				color: ${ACCENT};
+				background: #16080a;
+				outline: none;
+			}
+		`;
 		document.head.appendChild(style);
+
+		// Совет про наушники виден на обоих шагах; «нажми на экран» — только на первом.
+		const noticeStep = this._step('28px');
 		const notice = document.createElement('div');
 		notice.textContent = '🎧 Надень наушники';
 		Object.assign(notice.style, {
@@ -46,6 +72,16 @@ export class StartScreen {
 			borderRadius: '8px',
 			animation: 'start-notice-pulse 1.6s ease-in-out infinite',
 		});
+		const tap = document.createElement('div');
+		tap.textContent = 'и нажми на экран';
+		Object.assign(tap.style, { opacity: '0.7', fontSize: '18px', transition: `opacity ${STEP_FADE_TIME}s ease` });
+		noticeStep.append(notice, tap);
+
+		// Шаг 2: описание и «Старт» — сначала скрыты.
+		const introStep = this._step('36px');
+		introStep.style.display = 'none';
+		introStep.style.opacity = '0';
+		introStep.style.cursor = 'default';
 		const text = document.createElement('div');
 		text.style.maxWidth = '640px';
 		for (const line of description) {
@@ -56,25 +92,47 @@ export class StartScreen {
 		}
 		const button = document.createElement('button');
 		button.textContent = 'Старт';
-		Object.assign(button.style, {
-			font: 'bold 20px system-ui, sans-serif',
-			color: '#16080a',
-			background: ACCENT,
-			border: 'none',
-			borderRadius: '6px',
-			padding: '12px 48px',
-			cursor: 'pointer',
-		});
+		button.className = 'start-button';
+		introStep.append(text, button);
+
+		const showIntro = () => {
+			if (this.noticeDone) return;
+			this.noticeDone = true;
+			this.root.style.cursor = 'default';
+			tap.style.opacity = '0';
+			window.setTimeout(() => {
+				tap.remove();
+				introStep.style.display = 'flex';
+				// Кадр на применение display, иначе переход прозрачности не сыграет.
+				requestAnimationFrame(() => requestAnimationFrame(() => (introStep.style.opacity = '1')));
+			}, STEP_FADE_TIME * 1000);
+		};
+		this.root.addEventListener('click', showIntro);
 		button.addEventListener('click', () => this._start());
 		window.addEventListener('keydown', (e) => {
-			if (e.code === 'Enter') this._start();
+			if (!this.noticeDone) showIntro();
+			// Enter срабатывает, только когда «Старт» уже виден (кнопка появилась).
+			else if (e.code === 'Enter' && introStep.style.opacity === '1') this._start();
 		});
-		this.root.append(notice, text, button);
+		this.root.append(noticeStep, introStep);
 		document.body.appendChild(this.root);
 	}
 
 	get open(): boolean {
 		return !this.started;
+	}
+
+	/** Колонка одного шага экрана с плавной сменой прозрачности. */
+	private _step(gap: string): HTMLDivElement {
+		const step = document.createElement('div');
+		Object.assign(step.style, {
+			display: 'flex',
+			flexDirection: 'column',
+			alignItems: 'center',
+			gap,
+			transition: `opacity ${STEP_FADE_TIME}s ease`,
+		});
+		return step;
 	}
 
 	private _start(): void {
