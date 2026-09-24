@@ -526,6 +526,7 @@ export class Sfx {
 	/**
 	 * Дуплет из обреза — тяжёлый: два почти слитых выстрела (второй на 12 мс позже). В каждом — короткий треск,
 	 * плотный «хлопок» шума с быстро темнеющим фильтром и низкий удар (шумовой низ и короткий синус — не «бочка»).
+	 * Для сочности — плотная середина («пух»), щелчок курков в самом начале и короткое отражение от стен.
 	 * Поверх — длинный глухой раскат, как эхо в помещении. Лёгкое насыщение — только на низком ударе (плотнее,
 	 * без хрипа в шуме); всё вместе — через компрессор, чтобы не клиппило.
 	 */
@@ -546,7 +547,31 @@ export class Sfx {
 		drive.connect(comp);
 		comp.connect(master);
 		master.connect(ctx.destination);
+		// Короткое отражение от стен (слэпбэк) с парой повторов, каждый глуше, — выстрел звучит «в помещении», объёмнее.
+		const echo = ctx.createDelay(0.5);
+		echo.delayTime.value = 0.085;
+		const echoTone = ctx.createBiquadFilter();
+		echoTone.type = 'lowpass';
+		echoTone.frequency.value = 1800;
+		const feedback = ctx.createGain();
+		feedback.gain.value = 0.3;
+		const echoOut = ctx.createGain();
+		echoOut.gain.value = 0.35;
+		comp.connect(echo);
+		echo.connect(echoTone);
+		echoTone.connect(feedback);
+		feedback.connect(echo);
+		echoTone.connect(echoOut);
+		echoOut.connect(ctx.destination);
+		// Петля обратной связи сама не отключится — разрываем, когда эхо отзвучало, иначе копилась бы с каждым выстрелом.
+		window.setTimeout(() => {
+			feedback.disconnect();
+			echo.disconnect();
+		}, 2500);
 		const t0 = ctx.currentTime + 0.005;
+
+		// Щелчок курков за мгновение до выстрела — механика, «сочность» атаки.
+		this._clack(t0, [2400, 4200], 0.25, 0.025);
 
 		for (const [delay, level] of [
 			[0, 1],
@@ -560,8 +585,8 @@ export class Sfx {
 			band.frequency.value = 2200;
 			band.Q.value = 0.7;
 			const crackGain = ctx.createGain();
-			crackGain.gain.setValueAtTime(0.5 * level, t);
-			crackGain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+			crackGain.gain.setValueAtTime(0.65 * level, t);
+			crackGain.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
 			crack.connect(band);
 			band.connect(crackGain);
 			crackGain.connect(comp);
@@ -580,6 +605,21 @@ export class Sfx {
 			low.connect(blastGain);
 			blastGain.connect(comp);
 			blast.start(t);
+
+			// Середина — плотный «пух» около 700 Гц: основа сочности, слышна и на маленьких динамиках.
+			const punch = this._noiseBurst(0.15);
+			const punchBand = ctx.createBiquadFilter();
+			punchBand.type = 'bandpass';
+			punchBand.frequency.setValueAtTime(900, t);
+			punchBand.frequency.exponentialRampToValueAtTime(500, t + 0.12);
+			punchBand.Q.value = 0.9;
+			const punchGain = ctx.createGain();
+			punchGain.gain.setValueAtTime(1.3 * level, t);
+			punchGain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+			punch.connect(punchBand);
+			punchBand.connect(punchGain);
+			punchGain.connect(comp);
+			punch.start(t);
 
 			// Низкий удар — «вес» выстрела. Короткий и негромкий: длинный тональный синус звучит как бочка.
 			// Основной низ — шумовой (полоса ~160 Гц), без тона.
@@ -824,6 +864,64 @@ export class Sfx {
 		raspLfo.start(t);
 		vibrato.stop(t + duration + 0.05);
 		raspLfo.stop(t + duration + 0.05);
+	}
+
+	/** Запертую стеклянную дверь дёргают: лязг ручки и замка, дребезг стекла в раме — несколько рывков подряд. */
+	doorRattle(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		for (const [delay, level] of [
+			[0, 1],
+			[0.16, 0.8],
+			[0.3, 0.9],
+			[0.47, 0.6],
+			[0.62, 0.4],
+		] as const) {
+			this._clack(t + delay, [650 + Math.random() * 150, 1700, 3200 + Math.random() * 500], 0.3 * level, 0.08);
+			// Стекло дребезжит чуть позже рывка.
+			this._clack(t + delay + 0.02, [4200 + Math.random() * 800, 5600], 0.08 * level, 0.12);
+			this._soft(t + delay, 0.05, 400, 0.15 * level);
+		}
+	}
+
+	/** Игрока ударили: глухой удар по телу и короткий сдавленный выдох героя. */
+	playerHurt(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		const hit = this._noiseBurst(0.12);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.setValueAtTime(900, t);
+		low.frequency.exponentialRampToValueAtTime(160, t + 0.1);
+		const hitGain = ctx.createGain();
+		hitGain.gain.setValueAtTime(1.1, t);
+		hitGain.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
+		hit.connect(low);
+		low.connect(hitGain);
+		hitGain.connect(ctx.destination);
+		hit.start(t);
+
+		// Выдох «ых»: низкий голос через «гласную», быстро гаснет, тон падает.
+		const voice = ctx.createOscillator();
+		voice.type = 'sawtooth';
+		voice.frequency.setValueAtTime(150, t + 0.03);
+		voice.frequency.exponentialRampToValueAtTime(95, t + 0.25);
+		const vowel = ctx.createBiquadFilter();
+		vowel.type = 'bandpass';
+		vowel.frequency.value = 600;
+		vowel.Q.value = 3;
+		const voiceGain = ctx.createGain();
+		voiceGain.gain.setValueAtTime(0.0001, t + 0.03);
+		voiceGain.gain.linearRampToValueAtTime(0.3, t + 0.06);
+		voiceGain.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
+		voice.connect(vowel);
+		vowel.connect(voiceGain);
+		voiceGain.connect(ctx.destination);
+		voice.start(t + 0.03);
+		voice.stop(t + 0.3);
+		this._soft(t + 0.03, 0.2, 1500, 0.1);
 	}
 
 	/** Обрез достают: шорох одежды и лязг металла, когда его перехватывают в руках. */

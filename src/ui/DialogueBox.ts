@@ -26,6 +26,8 @@ export class DialogueBox {
 	/** Хвост-глитч текущей реплики уже показан. */
 	private glitchShown = false;
 	private pause = 0;
+	/** Сколько реплика висит допечатанной, с — для autoClose. */
+	private held = 0;
 	/** Сколько ещё ждать перед первой репликой (пока выезжает кинорамка), с. */
 	private delay = 0;
 	private time = 0;
@@ -79,6 +81,7 @@ export class DialogueBox {
 		this.shown = 0;
 		this.glitchShown = false;
 		this.pause = 0;
+		this.held = 0;
 		this.delay = delay;
 		this.root.style.display = delay > 0 ? 'none' : 'flex';
 		this._render();
@@ -100,6 +103,7 @@ export class DialogueBox {
 		this.shown = 0;
 		this.glitchShown = false;
 		this.pause = 0;
+		this.held = 0;
 		if (this.lineIndex >= dialogue.lines.length) {
 			this.dialogue = null;
 			this.root.style.display = 'none';
@@ -138,7 +142,17 @@ export class DialogueBox {
 				}
 			}
 		}
-		if (this.shown >= line.text.length) this._revealGlitch();
+		if (this.shown >= line.text.length) {
+			this._revealGlitch();
+			// Реплика катсцены: повисела допечатанной — закрывается сама.
+			if (line.autoClose !== undefined) {
+				this.held += dt;
+				if (this.held >= line.autoClose) {
+					this.advance();
+					return;
+				}
+			}
+		}
 		this._render();
 	}
 
@@ -157,6 +171,8 @@ export class DialogueBox {
 		const visible = line.text.slice(0, Math.floor(this.shown)) + (this.glitchShown ? (line.glitch ?? '') : '');
 		if (this.text.textContent !== visible) this.text.textContent = visible;
 		const done = this.shown >= line.text.length;
+		// У реплик, которые закрываются сами, «ЛКМ ▶» не показываем.
+		this.hint.style.display = line.autoClose !== undefined ? 'none' : '';
 		this.hint.style.opacity = done && Math.floor(this.time * 2.5) % 2 === 0 ? '1' : '0.35';
 	}
 }

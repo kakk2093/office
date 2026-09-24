@@ -29,6 +29,8 @@ const CLOSE_START = 1.35;
 const CLOSE_END = 1.47;
 const TILT_END = 0.3;
 const RELOAD_TIME = 1.75;
+/** Во сколько раз перезарядка идёт быстрее, чем расписана по времени выше (всё — и движения, и звуки). */
+const RELOAD_SPEED = 2;
 /** Левая рука при перезарядке: уходит с цевья за патронами, приносит их к патронникам, возвращается на цевьё. */
 const HAND_OFF_START = 0.4;
 const HAND_POCKET = 0.6;
@@ -150,6 +152,13 @@ export class SawedOff {
 		return this.away === 0 && this.awayTarget === 0;
 	}
 
+	/** Сразу убран, без анимации и звука (в начале игры). */
+	holsterNow(): void {
+		this.away = this.awayTarget = 1;
+		this._holsterPose();
+		this.group.visible = false;
+	}
+
 	/** Убрать, если в руках, или достать, если убран. Во время выстрела и перезарядки — нельзя; false — не вышло. */
 	toggleHolster(): boolean {
 		if (this.reloadT !== null || this.fireT !== null || this.away !== this.awayTarget) return false;
@@ -205,7 +214,7 @@ export class SawedOff {
 		}
 		if (this.reloadT === null) return;
 		const prev = this.reloadT;
-		this.reloadT += dt;
+		this.reloadT += dt * RELOAD_SPEED;
 		this._reloadSounds(prev, this.reloadT);
 		if (this.reloadT >= RELOAD_TIME) {
 			this.reloadT = null;

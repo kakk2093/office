@@ -38,18 +38,19 @@ const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, play
 /** За сколько секунд затихает музыка, пока игрок доедает солянку. */
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
-const DEBUG_START_AT_CANTEEN = false;
+const DEBUG_START_AT_CANTEEN = true;
 /** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
 const DEBUG_SKIP_INTRO = true;
-/** Отладка: обрез в руках, ЛКМ — дуплет (после него сама перезарядка), R — перезарядка, T — убрать/достать. */
-const DEBUG_SHOTGUN = true;
+/** Отладка: начинать с обрезом в руках (иначе он убран до конца побега в столовой). ЛКМ — дуплет (после него
+ * сама перезарядка), R — перезарядка, T — убрать/достать (T работает всегда). */
+const DEBUG_SHOTGUN = false;
 /** Обрез в руках — в координатах камеры: справа внизу, дулом чуть к центру экрана. */
 const SHOTGUN_HELD_POSITION = new THREE.Vector3(0.16, -0.17, -0.42);
 const SHOTGUN_HELD_YAW = 0.06;
 /** Размах покачивания обреза при ходьбе, м (в координатах камеры). */
 const SHOTGUN_BOB = 0.01;
 /** Отладка: зомби-раздатчица в офисе — стоит в свободном углу, лицом к месту старта. */
-const DEBUG_ZOMBIE = true;
+const DEBUG_ZOMBIE = false;
 const ZOMBIE_TEST_POSITION = { x: 1.5, z: 2 };
 /** Ближе этого (м) зомби не стонет, а рычит. */
 const ZOMBIE_ANGRY_DISTANCE = 3;
@@ -57,6 +58,11 @@ const ZOMBIE_ANGRY_DISTANCE = 3;
 const PELLETS = 18;
 const PELLET_SPREAD = 0.06;
 const PELLET_RANGE = 40;
+/** Урон: столько ударов — смерть; через столько секунд без ударов здоровье восстанавливается полностью. */
+const PLAYER_HITS = 6;
+const REGEN_DELAY = 3;
+/** Зомби попадает, если игрок в момент удара не дальше этого, м. */
+const ZOMBIE_HIT_RANGE = 1.6;
 /** Сбой картинки и звука (глитч в реплике): сколько длится, с. */
 const GLITCH_TIME = 0.4;
 /** После «Старт» — столько секунд просто смотрим в окно (без управления), потом начинаются мысли героя. */
@@ -120,8 +126,19 @@ export class Game {
 	readonly street: Street;
 	readonly canteen: Canteen;
 	readonly player: PlayerController;
-	/** Обрез в руках (пока только для отладки, см. DEBUG_SHOTGUN): висит на камере. */
-	private readonly shotgun: SawedOff | null = null;
+	/** Обрез: висит на камере; убран, пока герой не достанет его в конце побега (или сразу в руках — DEBUG_SHOTGUN). */
+	private readonly shotgun = new SawedOff();
+	/** Сколько ударов получил (к PLAYER_HITS — смерть); сколько секунд без ударов; сила виньетки на экране (плавно). */
+	private hurt = 0;
+	private sinceHurt = 0;
+	private vignetteShown = 0;
+	/** Вспышка виньетки в момент удара, 1 → 0. */
+	private hurtPulse = 0;
+	/** Идёт переход после смерти: в залитом экране — бой заново, а не смена места. */
+	private respawning = false;
+	private readonly vignette = document.getElementById('vignette')!;
+	/** Уже кого-то убил — подсказку «ЛКМ — стрелять» больше не показываем. */
+	private hasKilled = false;
 	/** Враги по местам (пока только тестовый зомби в офисе). */
 	private readonly zombies: { place: Place; zombie: Zombie; collider: ReturnType<CircleColliders['add']> | null }[] = [];
 	private readonly raycaster = new THREE.Raycaster();
@@ -139,8 +156,7 @@ export class Game {
 		this.canteen = new Canteen(this.canteenColliders);
 		this.player = new PlayerController(this.camera, this.input, this.room, this.colliders);
 		this.player.onStep = (loud) => this.footsteps.play(loud);
-		if (DEBUG_SHOTGUN) {
-			this.shotgun = new SawedOff();
+		{
 			this.shotgun.group.position.copy(SHOTGUN_HELD_POSITION);
 			this.shotgun.group.rotation.y = SHOTGUN_HELD_YAW;
 			this.camera.add(this.shotgun.group);
@@ -154,7 +170,10 @@ export class Game {
 				holster: () => this.sfx.shotgunHolster(),
 			};
 			this.shotgun.onSound = (sound) => sounds[sound]();
+			if (!DEBUG_SHOTGUN) this.shotgun.holsterNow();
 		}
+		// Зомби столовой — враги (попадания, стоны, удары); выходят в катсцене после разбитого подноса.
+		this._registerCanteenZombies();
 		if (DEBUG_ZOMBIE) {
 			const zombie = new Zombie();
 			const { x, z } = ZOMBIE_TEST_POSITION;
@@ -202,6 +221,12 @@ export class Game {
 		};
 		this.canteen.onDoorSlam = () => this.sfx.scare();
 		this.canteen.onCameraPose = (pose) => this.player.setPose(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
+		this.canteen.onDialogue = (dialogue) => this._startDialogue(dialogue);
+		this.canteen.onFootstep = () => this.footsteps.play(1.3);
+		this.canteen.onDoorRattle = () => this.sfx.doorRattle();
+		this.canteen.onDrawWeapon = () => {
+			if (this.shotgun.holstered) this.shotgun.toggleHolster();
+		};
 
 		// Автоплей звука запрещён без жеста пользователя — запускаем звук на первый клик/клавишу (обычно ещё
 		// на стартовом экране). Если игра началась не в офисе — сразу и уличное (дождь, ударные): до жеста их нельзя
@@ -277,6 +302,7 @@ export class Game {
 		this.hint.style.display = this.input.isPointerLocked ? 'none' : 'flex';
 		this._updateStreet(dt);
 		this._updateGlitch(dt);
+		this._updateHurt(dt);
 
 		this.post.render(this._scene(), this.camera);
 		this.input.endFrame();
@@ -285,7 +311,6 @@ export class Game {
 	/** Обрез в руках: камера с ним должна быть в сцене текущего места (иначе дочерние объекты не рисуются).
 	 * ЛКМ — дуплет, R — перезарядка; не во время разговора, перехода, вступления и катсцен, а за столом ЛКМ — ложка. */
 	private _updateShotgun(dt: number): void {
-		if (!this.shotgun) return;
 		const scene = this._scene();
 		if (this.camera.parent !== scene) scene.add(this.camera);
 		// Обрез покачивается в такт шагам: из стороны в сторону и чуть отстаёт вниз, когда глаза поднимаются.
@@ -335,6 +360,47 @@ export class Game {
 		return (hit && alive.find((z) => z.owns(hit.object))) ?? null;
 	}
 
+	/** Зомби столовой — в общий список врагов (прежние, если были, — убираем: после перезапуска боя они новые). */
+	private _registerCanteenZombies(): void {
+		for (let i = this.zombies.length - 1; i >= 0; i--) if (this.zombies[i].place === 'canteen') this.zombies.splice(i, 1);
+		for (const zombie of this.canteen.zombies) {
+			this.zombies.push({ place: 'canteen', zombie, collider: null });
+			zombie.onGroan = () => this._zombieGroan(zombie);
+			zombie.onAttack = () => this._zombieAttack(zombie);
+		}
+	}
+
+	/** Удар зомби: попал, если игрок рядом (и не идёт переход). Вспышка виньетки, тряска, звук; шестой — смерть. */
+	private _zombieAttack(zombie: Zombie): void {
+		if (this.flashTime !== null || this.place !== 'canteen' || !zombie.alive) return;
+		const distance = Math.hypot(zombie.group.position.x - this.camera.position.x, zombie.group.position.z - this.camera.position.z);
+		if (distance > ZOMBIE_HIT_RANGE) return;
+		this.hurt++;
+		this.sinceHurt = 0;
+		this.hurtPulse = 1;
+		this.player.shake(0.7);
+		this.sfx.playerHurt();
+		if (this.hurt >= PLAYER_HITS) {
+			// Смерть: экран заливает красным, как при переходах, — и бой начинается заново.
+			this.respawning = true;
+			this._beginTransition('canteen');
+		}
+	}
+
+	/**
+	 * Урон на экране — только виньетка: краснеет от краёв тем сильнее, чем больше ударов, и вспыхивает в момент удара.
+	 * REGEN_DELAY без ударов — здоровье полностью восстанавливается (виньетка плавно гаснет).
+	 */
+	private _updateHurt(dt: number): void {
+		this.sinceHurt += dt;
+		if (this.hurt > 0 && this.sinceHurt >= REGEN_DELAY && !this.respawning) this.hurt = 0;
+		this.hurtPulse = Math.max(0, this.hurtPulse - dt * 2.5);
+		const target = this.hurt / PLAYER_HITS;
+		this.vignetteShown += (target - this.vignetteShown) * (1 - Math.exp(-dt * (target > this.vignetteShown ? 12 : 2)));
+		const opacity = Math.min(1, this.vignetteShown * 0.9 + this.hurtPulse * 0.35);
+		this.vignette.style.opacity = opacity.toFixed(3);
+	}
+
 	/** Стон зомби: тише с расстоянием, панорама — с какой стороны он от взгляда; вблизи — злой рык. */
 	private _zombieGroan(zombie: Zombie): void {
 		// До первого клика звук ещё не разрешён — стоны копились бы в приостановленном звуке и потом звучали разом.
@@ -366,6 +432,7 @@ export class Game {
 			if (target.zombie.alive) this.sfx.flesh();
 			else {
 				// Разорвало — сквозь останки можно пройти.
+				this.hasKilled = true;
 				this.sfx.gore();
 				if (target.collider) this.colliders.remove(target.collider);
 				target.collider = null;
@@ -394,7 +461,7 @@ export class Game {
 			else if (hit && onZombie) ends.push({ point: ray.at(hit.distance, point), normal: null });
 			else ends.push({ point: ray.at(PELLET_RANGE, point), normal: null });
 		}
-		this.impacts.shot(scene, this.shotgun!.muzzle(new THREE.Vector3()), ends);
+		this.impacts.shot(scene, this.shotgun.muzzle(new THREE.Vector3()), ends);
 	}
 
 	/** Глитч: сила скачет от кадра к кадру (то сильный сбой, то почти чисто) и к концу спадает; картинка каждый кадр новая. */
@@ -470,6 +537,13 @@ export class Game {
 		}
 		const action = this.flashTime === null ? this._nearbyInteraction() : null;
 		if (!action) {
+			// Обрез в руках — подсказка, как стрелять, пока никого не убил.
+			if (this.shotgun.ready && !this.hasKilled) {
+				this.prompt.textContent = 'ЛКМ — стрелять';
+				this.prompt.classList.remove('low');
+				this.prompt.style.display = 'block';
+				return;
+			}
 			this.prompt.style.display = 'none';
 			return;
 		}
@@ -522,10 +596,11 @@ export class Game {
 			// Сначала — предмет в прицеле (подносы, хлеб), потом дверь.
 			const focused = this.canteen.interaction(this.camera);
 			if (focused) return focused;
-			// Из столовой не выйти: сначала — незачем, после катсцены дверь не открывается.
+			// Из столовой не выйти: сначала — незачем; после разбитого подноса дверь уже дёргали в катсцене —
+			// больше с ней ничего не сделать, подсказки нет.
 			const { exitDoor } = this.canteen;
-			if (!near(exitDoor.x, exitDoor.z)) return null;
-			const text = this.canteen.finished ? 'Не поддаётся.' : 'Незачем выходить. Я же ещё не поел соляночку.';
+			if (this.canteen.finished || !near(exitDoor.x, exitDoor.z)) return null;
+			const text = 'Незачем выходить. Я же ещё не поел соляночку.';
 			return {
 				text: 'выйти на улицу',
 				dialogue: { lines: [{ speaker: PLAYER_NAME, text, voice: 'player' }] },
@@ -590,6 +665,18 @@ export class Game {
 
 	/** Пока экран залит — переключаем сцену и набор коллайдеров у игрока: места никак не связаны в пространстве. */
 	private _teleport(): void {
+		if (this.respawning) {
+			// Бой заново: зомби на местах, игрок у двери, здоровье полное.
+			this.respawning = false;
+			this.hurt = 0;
+			this.vignetteShown = 0;
+			this.hurtPulse = 0;
+			this.canteen.restartFight();
+			this._registerCanteenZombies();
+			const { fightSpawn } = this.canteen;
+			this.player.spawn(fightSpawn.x, fightSpawn.z, fightSpawn.yaw);
+			return;
+		}
 		const from = this.place;
 		this.place = this.destination;
 		if (this.place === 'canteen') {

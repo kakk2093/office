@@ -49,8 +49,8 @@ import {
 	type BreadKind,
 	type DrinkKind,
 } from './CanteenProps.js';
-import { DinnerLady, Cashier } from './People.js';
-import { PLAYER_NAME, type Interaction, type Seat, type CameraPose } from '../core/Interaction.js';
+import { DinnerLady, Cashier, Zombie } from './People.js';
+import { PLAYER_NAME, type Interaction, type Seat, type CameraPose, type Dialogue } from '../core/Interaction.js';
 
 /**
  * Столовая изнутри — отдельная сцена, как офис. Вход с юга (+Z); за входом зал: 12 столов в два ряда
@@ -227,6 +227,46 @@ const FLICKER_TIME = 0.35;
 /** Входная дверь в южной стене; створка при выходе открывается наружу (от игрока). */
 const DOOR_Z = SOUTH_Z - WALL_THICKNESS / 2 - 0.05;
 
+/**
+ * Побег (продолжение катсцены после разбитого подноса): из распахнутой двери выходят зомби (ESCAPE_EMERGE) →
+ * герой разворачивается и бежит к выходу по проходу → дёргает дверь (ESCAPE_RATTLE) — «Не поддаётся.» →
+ * оборачивается (ESCAPE_TURN): в зале уже толпа зомби и идут на него → смотрит (ESCAPE_LOOK) — «Ну всё, суки.» →
+ * достаёт обрез (ESCAPE_DRAW), управление — игроку.
+ */
+const ESCAPE_EMERGE = 2.6;
+const ESCAPE_RUN_SPEED = 4.2;
+/** Как быстро поворачивается на бегу, рад/с; длина шага бегом, м; качание головы, м. */
+const ESCAPE_TURN_RATE = 5;
+const ESCAPE_STEP = 1.5;
+const ESCAPE_BOB = 0.045;
+const ESCAPE_RATTLE_START = 0.35;
+const ESCAPE_RATTLE = 0.9;
+const ESCAPE_TURN = 1.1;
+const ESCAPE_LOOK = 0.9;
+const ESCAPE_DRAW = 0.6;
+/** Реплики побега закрываются сами — столько висят допечатанными, с. */
+const ESCAPE_LINE_HOLD = 1.2;
+/** Где герой останавливается у двери (лицом к ней). */
+const ESCAPE_DOOR_STOP = SOUTH_Z - 1.1;
+/** Зомби: откуда выходят (из красной пустоты за дверью) и куда доходят за прилавком. */
+const ZOMBIE_EMERGE: { from: [number, number]; to: [number, number] }[] = [
+	{ from: [KITCHEN_DOOR_X, NORTH_Z - 0.8], to: [0.7, -8.4] },
+	{ from: [KITCHEN_DOOR_X + 0.2, NORTH_Z - 1.9], to: [2.1, -8.6] },
+];
+/** Где стоят зомби в зале, когда герой оборачивается от двери (сколько точек — столько и зомби): по проходу
+ * и у раздачи, в 9–14 м от него. */
+const ZOMBIE_HALL: [number, number][] = [
+	[-0.4, -0.4],
+	[0.9, -1.7],
+	[-1.5, -2.9],
+	[1.6, 0.6],
+	[2.0, -3.6],
+	[-2.4, -4.8],
+];
+const ZOMBIE_WALK_SPEED = 0.6;
+
+type EscapePhase = 'emerge' | 'run' | 'door' | 'turn' | 'draw';
+
 export class Canteen {
 	readonly scene = new THREE.Scene();
 	readonly bounds: RoomBounds = { minX: -WIDTH / 2, maxX: WIDTH / 2, minZ: NORTH_Z, maxZ: SOUTH_Z };
@@ -310,6 +350,32 @@ export class Canteen {
 	/** Game играет звук разбитой посуды и страшный звук распахнувшейся двери. */
 	onTrayCrash: (() => void) | null = null;
 	onDoorSlam: (() => void) | null = null;
+	/** Побег: реплика героя (катсцена ждёт её конца), шаги на бегу, дёрнули входную дверь, достать обрез. */
+	onDialogue: ((dialogue: Dialogue) => void) | null = null;
+	onFootstep: (() => void) | null = null;
+	onDoorRattle: (() => void) | null = null;
+	onDrawWeapon: (() => void) | null = null;
+	/** Зомби зала: до побега спрятаны; Game регистрирует их как врагов (попадания, стоны). */
+	readonly zombies: Zombie[] = [];
+	/** Створка входной двери — дёргается, когда герой пытается выйти. */
+	private doorLeaf!: THREE.Object3D;
+	/** Побег идёт: фаза, время в ней, поза камеры, путь, шаги; null — ещё не начался или закончился (см. escaped). */
+	private escape: {
+		phase: EscapePhase;
+		t: number;
+		x: number;
+		z: number;
+		yaw: number;
+		pitch: number;
+		waypoints: THREE.Vector2[];
+		stepDistance: number;
+		bobPhase: number;
+		turnFrom: number;
+		dialogueStarted: boolean;
+		dialogueDone: boolean;
+	} | null = null;
+	/** Побег закончился — управление у игрока, зомби идут на него. */
+	private escaped = false;
 	private readonly focusDir = new THREE.Vector3();
 	private readonly focusTo = new THREE.Vector3();
 
@@ -347,6 +413,16 @@ export class Canteen {
 
 		this.heldTray.visible = false;
 		this.scene.add(this.heldTray);
+
+		for (let i = 0; i < ZOMBIE_HALL.length; i++) {
+			const zombie = new Zombie();
+			zombie.group.visible = false;
+			zombie.speed = ZOMBIE_WALK_SPEED;
+			const margin = 0.25;
+			zombie.bounds = { minX: -WIDTH / 2 + margin, maxX: WIDTH / 2 - margin, minZ: NORTH_Z + margin, maxZ: SOUTH_Z - margin };
+			this.scene.add(zombie.group);
+			this.zombies.push(zombie);
+		}
 	}
 
 	/**
@@ -355,10 +431,14 @@ export class Canteen {
 	 */
 	get objective(): { text: string; at: THREE.Vector3 | null } | null {
 		const at = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
-		// После катсцены — к распахнутой красной двери.
-		// TODO: переход в следующую сцену через эту дверь пока не сделан — маркер ведёт к ней, но у двери ничего
-		// не происходит (и зайти за неё нельзя: не пускает граница зала). Реализуем позже.
-		if (this.finished) return { text: 'Подойди к двери', at: at(KITCHEN_DOOR_X, KITCHEN_DOOR_HEIGHT + 0.2, NORTH_Z + WALL_THICKNESS / 2) };
+		// После побега — перебить зомби (без маркеров: они и так идут на тебя), потом — к красной двери за раздачей.
+		// TODO: у красной двери пока ничего не происходит (и зайти за неё нельзя: не пускает граница зала).
+		if (this.escaped) {
+			const killed = this.zombies.filter((zombie) => !zombie.alive).length;
+			if (killed < this.zombies.length) return { text: `Убей всех (${killed}/${this.zombies.length})`, at: null };
+			return { text: 'Иди к красной двери', at: at(KITCHEN_DOOR_X, KITCHEN_DOOR_HEIGHT + 0.2, NORTH_Z + WALL_THICKNESS / 2) };
+		}
+		// Разбили поднос — дальше катсцена побега, задач нет.
 		if (this.trayDropped) return null;
 		if (!this.trayHeld) return { text: 'Возьми поднос', at: at(TRAY_STACK_POS.x, COUNTER_TOP + 0.25, TRAY_STACK_POS.z) };
 		if (this.breadOnTray < BREAD_PER_TRAY) {
@@ -708,6 +788,10 @@ export class Canteen {
 	private _updateCutscene(dt: number): void {
 		const seat = this.seat;
 		if (this.cutsceneTime < 0 || !seat) return;
+		if (this.escape) {
+			this._updateEscape(dt);
+			return;
+		}
 		// Пока игрок сидит спиной к раздаче — всё меняется незаметно.
 		if (this.cutsceneTime === 0) this._emptyHall();
 		this.cutsceneTime += dt;
@@ -758,12 +842,187 @@ export class Canteen {
 		const shakePitch = Math.sin(t * 61 + 3) * SHAKE_ANGLE * a;
 		this.onCameraPose?.({ x: x + shakeX, y: y + shakeY, z, yaw: yaw + shakeYaw, pitch: pitch + shakePitch });
 
+		// Дверь распахнулась — из неё сразу выходят зомби.
+		if (this.slamTime >= 0 && !this.zombies[0].group.visible) this._emergeZombies();
 		if (this.crashTime >= CUTSCENE_SHAKE) {
-			this.cutsceneTime = -1;
-			this.seated = false;
-			this.onCameraPose?.({ x, y, z, yaw, pitch });
-			this.onStand?.(x, z);
+			this.escape = {
+				phase: 'emerge',
+				t: 0,
+				x,
+				z,
+				yaw,
+				pitch,
+				waypoints: [],
+				stepDistance: 0,
+				bobPhase: 0,
+				turnFrom: yaw,
+				dialogueStarted: false,
+				dialogueDone: false,
+			};
 		}
+	}
+
+	/** Двое выходят из красной пустоты за распахнутой дверью за прилавок — видно поверх него. Идут насквозь (без коллайдеров). */
+	private _emergeZombies(): void {
+		ZOMBIE_EMERGE.forEach(({ from, to }, i) => {
+			const zombie = this.zombies[i];
+			zombie.group.visible = true;
+			zombie.group.position.set(from[0], 0, from[1]);
+			zombie.group.rotation.y = 0;
+			zombie.target = new THREE.Vector3(to[0], 0, to[1]);
+			zombie.stopDistance = 0.05;
+			zombie.speed = 0.9;
+		});
+	}
+
+	/** Где встаёт игрок, когда бой начинается заново (после смерти): у входной двери, лицом в зал. */
+	readonly fightSpawn = { x: 0, z: ESCAPE_DOOR_STOP, yaw: 0 };
+
+	/**
+	 * Бой заново (игрок погиб): старые зомби с останками и кровью убираются, новые — на местах в зале, сразу охотятся.
+	 * Game после этого заново регистрирует zombies.
+	 */
+	restartFight(): void {
+		for (const zombie of this.zombies) zombie.dispose();
+		this.zombies.length = 0;
+		for (const [x, z] of ZOMBIE_HALL) {
+			const zombie = new Zombie();
+			const margin = 0.25;
+			zombie.bounds = { minX: -WIDTH / 2 + margin, maxX: WIDTH / 2 - margin, minZ: NORTH_Z + margin, maxZ: SOUTH_Z - margin };
+			zombie.group.position.set(x, 0, z);
+			zombie.group.rotation.y = Math.atan2(this.fightSpawn.x - x, this.fightSpawn.z - z);
+			zombie.target = new THREE.Vector3(this.fightSpawn.x, 0, this.fightSpawn.z);
+			zombie.stopDistance = 1.0;
+			zombie.speed = ZOMBIE_WALK_SPEED;
+			zombie.colliders = this.colliders;
+			zombie.hunting = true;
+			this.scene.add(zombie.group);
+			this.zombies.push(zombie);
+		}
+	}
+
+	/** Пока герой у двери спиной к залу — все зомби уже в зале, стоят лицом к нему (пойдут, когда он обернётся). */
+	private _zombiesInHall(): void {
+		ZOMBIE_HALL.forEach(([x, z], i) => {
+			const zombie = this.zombies[i];
+			zombie.group.visible = true;
+			zombie.group.position.set(x, 0, z);
+			zombie.group.rotation.y = Math.atan2(-x, ESCAPE_DOOR_STOP - z);
+			zombie.target = null;
+			zombie.stopDistance = 1.0;
+			zombie.speed = ZOMBIE_WALK_SPEED;
+			zombie.colliders = this.colliders;
+		});
+	}
+
+	/** Побег: фазы — см. ESCAPE_*. Камеру ведём сами (onCameraPose); игрок всё ещё «сидит» — управления нет. */
+	private _updateEscape(dt: number): void {
+		const e = this.escape!;
+		e.t += dt;
+		let bob = 0;
+		const turnToward = (want: number, rate: number) => {
+			const diff = Math.atan2(Math.sin(want - e.yaw), Math.cos(want - e.yaw));
+			e.yaw += THREE.MathUtils.clamp(diff, -rate * dt, rate * dt);
+			return diff;
+		};
+		const ease = (k: number) => {
+			const c = THREE.MathUtils.clamp(k, 0, 1);
+			return c * c * (3 - 2 * c);
+		};
+		const next = (phase: EscapePhase) => {
+			e.phase = phase;
+			e.t = 0;
+			e.turnFrom = e.yaw;
+			e.dialogueStarted = false;
+			e.dialogueDone = false;
+		};
+		const say = (text: string) => {
+			if (e.dialogueStarted) return;
+			e.dialogueStarted = true;
+			this.onDialogue?.({
+				lines: [{ speaker: PLAYER_NAME, text, voice: 'player', autoClose: ESCAPE_LINE_HOLD }],
+				onEnd: () => (e.dialogueDone = true),
+			});
+		};
+
+		switch (e.phase) {
+			case 'emerge':
+				// Смотрим, как они выходят; взгляд чуть опускается к ним.
+				e.pitch = THREE.MathUtils.lerp(e.pitch, -0.05, 1 - Math.exp(-dt * 2));
+				if (e.t >= ESCAPE_EMERGE) {
+					// Путь к выходу: в проход между рядами столов, по нему — к двери.
+					e.waypoints = [new THREE.Vector2(0, e.z), new THREE.Vector2(0, ESCAPE_DOOR_STOP)];
+					next('run');
+				}
+				break;
+			case 'run': {
+				const target = e.waypoints[0];
+				// Камера смотрит вдоль −Z при yaw 0: yaw на точку — atan2(−dx, −dz).
+				const diff = turnToward(Math.atan2(-(target.x - e.x), -(target.y - e.z)), ESCAPE_TURN_RATE);
+				e.pitch = THREE.MathUtils.lerp(e.pitch, 0, 1 - Math.exp(-dt * 4));
+				// Пока разворачивается — почти стоит; бежит, когда смотрит туда, куда бежит.
+				const speed = ESCAPE_RUN_SPEED * Math.max(0, 1 - Math.abs(diff) / 1.2);
+				const distance = Math.hypot(target.x - e.x, target.y - e.z);
+				const step = Math.min(speed * dt, distance);
+				if (distance > 1e-6) {
+					e.x += ((target.x - e.x) / distance) * step;
+					e.z += ((target.y - e.z) / distance) * step;
+				}
+				e.stepDistance += step;
+				e.bobPhase += (step / ESCAPE_STEP) * Math.PI;
+				if (e.stepDistance >= ESCAPE_STEP) {
+					e.stepDistance -= ESCAPE_STEP;
+					this.onFootstep?.();
+				}
+				bob = Math.abs(Math.sin(e.bobPhase)) * ESCAPE_BOB;
+				if (distance < 0.05) {
+					e.waypoints.shift();
+					if (e.waypoints.length === 0) {
+						this._zombiesInHall();
+						next('door');
+					}
+				}
+				break;
+			}
+			case 'door': {
+				// Лицом к двери (+Z); дёргаем — створка дребезжит, но не открывается.
+				turnToward(Math.PI, ESCAPE_TURN_RATE);
+				const r = e.t - ESCAPE_RATTLE_START;
+				if (r >= 0 && r < ESCAPE_RATTLE) {
+					if (r - dt < 0) this.onDoorRattle?.();
+					this.doorLeaf.rotation.y = -Math.abs(Math.sin(r * 38)) * 0.025 * (1 - r / ESCAPE_RATTLE);
+				} else this.doorLeaf.rotation.y = 0;
+				if (r >= ESCAPE_RATTLE + 0.2) say('Не поддаётся.');
+				if (e.dialogueDone) {
+					// Оборачивается — а они уже идут.
+					for (const zombie of this.zombies) zombie.target = new THREE.Vector3(e.x, 0, e.z);
+					next('turn');
+				}
+				break;
+			}
+			case 'turn': {
+				// Оборачивается к залу — через левое плечо; смотрит на идущих к нему.
+				e.yaw = e.turnFrom + Math.PI * ease(e.t / ESCAPE_TURN);
+				if (e.t >= ESCAPE_TURN + ESCAPE_LOOK) say('Ну всё, суки.');
+				if (e.dialogueDone) {
+					this.onDrawWeapon?.();
+					next('draw');
+				}
+				break;
+			}
+			case 'draw':
+				if (e.t >= ESCAPE_DRAW) {
+					this.escape = null;
+					this.escaped = true;
+					this.cutsceneTime = -1;
+					this.seated = false;
+					this.onCameraPose?.({ x: e.x, y: STANDING_EYE_Y, z: e.z, yaw: e.yaw, pitch: e.pitch });
+					this.onStand?.(e.x, e.z);
+					return;
+				}
+				break;
+		}
+		this.onCameraPose?.({ x: e.x, y: STANDING_EYE_Y + bob, z: e.z, yaw: e.yaw, pitch: e.pitch });
 	}
 
 	/**
@@ -854,6 +1113,13 @@ export class Canteen {
 		this._updateFallingTray(dt);
 		this._updateDarkness(dt);
 		this.cashier.update(dt);
+		// После побега зомби идут туда, где игрок, и бьют, подойдя.
+		if (this.escaped) {
+			for (const zombie of this.zombies) {
+				zombie.hunting = true;
+				zombie.target?.set(camera.position.x, 0, camera.position.z);
+			}
+		}
 	}
 
 	/** Пол ровный: высота везде 0. */
@@ -970,6 +1236,7 @@ export class Canteen {
 		const { group, leaf } = createCanteenDoor(glass);
 		// Лицом в зал; «наружу» у двери — это +Z мира, а у повёрнутой на π группы — −Z, отсюда знак угла.
 		this._add(group, 0, 0, DOOR_Z, Math.PI);
+		this.doorLeaf = leaf;
 		// Портал вокруг двери — светлая филёнка по стене.
 		const surround = new THREE.Mesh(
 			new THREE.BoxGeometry(CANTEEN_DOOR_WIDTH + 0.3, 3.1, 0.04),

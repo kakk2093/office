@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SOUP_COLOR } from './CanteenProps.js';
+import type { CircleColliders } from '../physics/CircleColliders.js';
 
 /**
  * Работники столовой: низкополи-фигуры из коробок, как и вся сцена. Смотрят на +Z, начало координат — на полу
@@ -30,6 +31,8 @@ const SHOES = '#3a2c26';
 const TORSO_HEIGHT = 0.44;
 const STANDING_TORSO_Y = 0.98;
 const SEATED_TORSO_Y = 0.58;
+/** Верх ноги стоящей фигуры — ось шарнира бедра. */
+const LEG_TOP = 0.55;
 
 interface Arm {
 	shoulder: THREE.Group;
@@ -61,6 +64,8 @@ class Figure {
 	readonly armL: Arm;
 	/** Плечи/торс — для лёгкого покачивания. */
 	readonly body = new THREE.Group();
+	/** Ноги стоящей фигуры на шарнирах в бедре (для ходьбы); у сидящей — пусто. */
+	readonly legs: THREE.Group[] = [];
 	private readonly skin: string;
 
 	constructor(look: Look) {
@@ -102,12 +107,17 @@ class Figure {
 	}
 
 	private _standingLegs(coat: THREE.Material): void {
+		// Нога с туфлей — в группе-шарнире на уровне бедра (верх голени, под подолом).
 		for (const x of [-0.1, 0.1]) {
+			const hip = new THREE.Group();
+			hip.position.set(x, LEG_TOP, 0);
+			this.group.add(hip);
+			this.legs.push(hip);
 			const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.05, 0.5, 6), mat(STOCKINGS, 0.6));
-			leg.position.set(x, 0.3, 0);
+			leg.position.y = 0.3 - LEG_TOP;
 			leg.castShadow = true;
-			this.group.add(leg);
-			box(this.group, 0.1, 0.07, 0.22, mat(SHOES, 0.6), x, 0.035, 0.03);
+			hip.add(leg);
+			box(hip, 0.1, 0.07, 0.22, mat(SHOES, 0.6), 0, 0.035 - LEG_TOP, 0.03);
 		}
 		// Подол халата — расширяется книзу, до колен.
 		const hem = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.24, 0.46, 8), coat);
@@ -453,6 +463,19 @@ const POOL_TIME = 4;
 /** Стоны: пауза между ними, с (случайно в пределах). */
 const GROAN_MIN = 3;
 const GROAN_MAX = 7;
+/** Ходьба зомби: длина шага (м), как быстро поворачивается к цели (рад/с), радиус для столкновений. */
+const ZOMBIE_STEP = 0.55;
+const ZOMBIE_TURN_SPEED = 2.5;
+const ZOMBIE_RADIUS = 0.3;
+/**
+ * Удар: подойдя к цели (не дальше stopDistance + ATTACK_REACH), замахивается обеими руками (ATTACK_WINDUP), бьёт
+ * сверху вниз (к ATTACK_HIT — onAttack, Game решает, попал ли), возвращается (ATTACK_TIME) и ждёт ATTACK_COOLDOWN.
+ */
+const ATTACK_REACH = 0.3;
+const ATTACK_WINDUP = 0.4;
+const ATTACK_HIT = 0.5;
+const ATTACK_TIME = 0.85;
+const ATTACK_COOLDOWN = 0.8;
 
 interface BloodDrop {
 	mesh: THREE.Mesh;
@@ -497,6 +520,15 @@ export class Zombie {
 	readonly group = this.figure.group;
 	/** Где куски отскакивают от стен; null — не ограничиваем. */
 	bounds: GibBounds | null = null;
+	/** Куда идёт (обычно — к игроку); null — стоит на месте. Останавливается в stopDistance от цели. */
+	target: THREE.Vector3 | null = null;
+	speed = 0.7;
+	stopDistance = 1.0;
+	/** Препятствия, которые обходит (упирается и скользит вдоль); null — идёт насквозь (в катсцене). */
+	colliders: CircleColliders | null = null;
+	private walkPhase = 0;
+	/** 0 — стоит, 1 — идёт: плавно, чтобы шаг не обрывался. */
+	private walkWeight = 0;
 	private time = Math.random() * 10;
 	private health = ZOMBIE_HEALTH;
 	private exploded = false;
@@ -525,6 +557,15 @@ export class Zombie {
 	onGroan: (() => void) | null = null;
 	/** 1 — только что застонал: голова запрокидывается, к 0 — вернулась. */
 	private groan = 0;
+	/** Удар по цели: Game проверяет, рядом ли игрок, и наносит урон. */
+	onAttack: (() => void) | null = null;
+	/** Охотится на игрока — только тогда бьёт, подойдя к цели (в катсцене просто идёт). */
+	hunting = false;
+	/** Время с начала удара, с; null — не бьёт. */
+	private attackT: number | null = null;
+	private attackCooldown = 0;
+	/** Пятна крови на полу (с лужей) — чтобы убрать при dispose. */
+	private readonly splatMeshes: THREE.Mesh[] = [];
 
 	constructor() {
 		this._buildFace();
@@ -567,26 +608,106 @@ export class Zombie {
 		this.flinch = Math.max(0, this.flinch - dt / ZOMBIE_FLINCH_TIME);
 		this.groan = Math.max(0, this.groan - dt / 1.5);
 		this.groanTimer -= dt;
-		if (this.groanTimer <= 0) {
+		// Спрятанный (ещё не вышел на сцену) — молчит.
+		if (this.groanTimer <= 0 && this.group.visible) {
 			this.groanTimer = GROAN_MIN + Math.random() * (GROAN_MAX - GROAN_MIN);
 			this.groan = 1;
 			this.onGroan?.();
 		}
+		const moved = this.attackT === null ? this._walk(dt) : 0;
+		const swing = this._updateAttack(dt);
+		this.walkPhase += (moved / ZOMBIE_STEP) * Math.PI;
+		this.walkWeight += ((moved > 0.0001 ? 1 : 0) - this.walkWeight) * (1 - Math.exp(-dt * 6));
+		const step = Math.sin(this.walkPhase) * this.walkWeight;
+		// Шаркающая походка: ноги ходят вперёд-назад, тело переваливается с боку на бок и оседает на каждом шаге.
+		const [legR, legL] = this.figure.legs;
+		legR.rotation.x = step * 0.45;
+		legL.rotation.x = -step * 0.45;
+		body.position.y = -Math.abs(step) * 0.03;
+
 		// Руки вытянуты вперёд, как у зомби, кисти свисают; каждая чуть покачивается сама по себе.
-		const sway = Math.sin(this.time * 0.9);
-		armR.shoulder.rotation.set(-1.45 + Math.sin(this.time * 1.3) * 0.06, 0, 0.08);
-		armL.shoulder.rotation.set(-1.35 + Math.sin(this.time * 1.1 + 1) * 0.06, 0, -0.1);
+		const sway = Math.sin(this.time * 0.9) + step * 1.6;
+		// Удар: руки взмывают вверх (swing < 0) и рушатся вниз (swing > 0).
+		armR.shoulder.rotation.set(-1.45 + Math.sin(this.time * 1.3) * 0.06 - swing * 0.9, 0, 0.08);
+		armL.shoulder.rotation.set(-1.35 + Math.sin(this.time * 1.1 + 1) * 0.06 - swing * 0.9, 0, -0.1);
 		armR.elbow.rotation.x = -0.15;
 		armL.elbow.rotation.x = -0.25;
 		armR.hand.rotation.x = 0.5;
 		armL.hand.rotation.x = 0.65;
 		// Тело подалось вперёд и качается; от попадания — отшатывается назад.
-		body.rotation.set(0.12 - this.flinch * 0.3, 0, sway * 0.05);
+		body.rotation.set(0.12 - this.flinch * 0.3 + swing * 0.2, 0, sway * 0.05);
 		// Голова свёрнута набок и свешена; изредка дёргается.
 		const twitch = Math.sin(this.time * 7) > 0.97 ? Math.sin(this.time * 40) * 0.08 : 0;
 		// Стонет — голова запрокидывается назад.
 		const groanLift = Math.sin(this.groan * Math.PI) * 0.35;
 		head.rotation.set(0.2 - this.flinch * 0.4 - groanLift, 0.1, 0.4 + twitch);
+	}
+
+	/**
+	 * Удар: вблизи цели — замах, удар, возврат, пауза. Возвращает положение рук: −1 — занесены над головой,
+	 * +1 — в самом низу удара, 0 — обычно.
+	 */
+	private _updateAttack(dt: number): number {
+		this.attackCooldown = Math.max(0, this.attackCooldown - dt);
+		if (this.attackT === null) {
+			if (!this.hunting || !this.target || this.attackCooldown > 0) return 0;
+			const distance = Math.hypot(this.target.x - this.group.position.x, this.target.z - this.group.position.z);
+			if (distance > this.stopDistance + ATTACK_REACH) return 0;
+			this.attackT = 0;
+			// Замахиваясь — рычит.
+			this.groan = 1;
+			this.groanTimer = GROAN_MIN + Math.random() * (GROAN_MAX - GROAN_MIN);
+			this.onGroan?.();
+		}
+		const prev = this.attackT;
+		this.attackT += dt;
+		const t = this.attackT;
+		if (prev < ATTACK_HIT && t >= ATTACK_HIT) this.onAttack?.();
+		if (t >= ATTACK_TIME) {
+			this.attackT = null;
+			this.attackCooldown = ATTACK_COOLDOWN;
+			return 0;
+		}
+		const smooth = (k: number) => k * k * (3 - 2 * k);
+		if (t < ATTACK_WINDUP) return -smooth(t / ATTACK_WINDUP);
+		if (t < ATTACK_HIT) return -1 + 2 * ((t - ATTACK_WINDUP) / (ATTACK_HIT - ATTACK_WINDUP));
+		return 1 - smooth((t - ATTACK_HIT) / (ATTACK_TIME - ATTACK_HIT));
+	}
+
+	/** Убрать зомби со сцены целиком: тело, разлетевшиеся куски, капли и пятна крови (при перезапуске боя). */
+	dispose(): void {
+		for (const gib of this.gibs) gib.object.removeFromParent();
+		for (const drop of this.blood) drop.mesh.removeFromParent();
+		for (const splat of this.splatMeshes) splat.removeFromParent();
+		this.gibs.length = 0;
+		this.blood.length = 0;
+		this.splatMeshes.length = 0;
+		this.group.removeFromParent();
+	}
+
+	/** Шаг к цели: сначала поворачивается к ней (плавно), идёт вперёд, пока не подойдёт на stopDistance.
+	 * Возвращает, сколько прошёл за кадр, м. */
+	private _walk(dt: number): number {
+		if (!this.target) return 0;
+		const pos = this.group.position;
+		const dx = this.target.x - pos.x;
+		const dz = this.target.z - pos.z;
+		const distance = Math.hypot(dx, dz);
+		if (distance < 0.01) return 0;
+		const want = Math.atan2(dx, dz);
+		const turn = Math.atan2(Math.sin(want - this.group.rotation.y), Math.cos(want - this.group.rotation.y));
+		this.group.rotation.y += THREE.MathUtils.clamp(turn, -ZOMBIE_TURN_SPEED * dt, ZOMBIE_TURN_SPEED * dt);
+		if (distance <= this.stopDistance) return 0;
+		// Сильно отвернувшись от цели, почти не идёт — сперва разворачивается.
+		const facing = Math.max(0, Math.cos(turn));
+		const step = Math.min(this.speed * facing * dt, distance - this.stopDistance);
+		const yaw = this.group.rotation.y;
+		const startX = pos.x;
+		const startZ = pos.z;
+		pos.x += Math.sin(yaw) * step;
+		pos.z += Math.cos(yaw) * step;
+		this.colliders?.resolve(pos, ZOMBIE_RADIUS);
+		return Math.hypot(pos.x - startX, pos.z - startZ);
 	}
 
 	/**
@@ -607,8 +728,7 @@ export class Zombie {
 			if (child instanceof THREE.Mesh && child.position.y < STANDING_TORSO_Y) lower.attach(child);
 		}
 		// Сначала дальние звенья (кисть с предплечьем от плеча, голова, плечи от торса), потом сам торс и ноги.
-		const pieces: THREE.Object3D[] = [armR.elbow, armL.elbow, armR.shoulder, armL.shoulder, head, lower, body];
-		for (const child of this.group.children) if (child instanceof THREE.Mesh) pieces.push(child);
+		const pieces: THREE.Object3D[] = [armR.elbow, armL.elbow, armR.shoulder, armL.shoulder, head, lower, body, ...this.figure.legs];
 		const center = new THREE.Vector3();
 		this.group.localToWorld(center.set(0, STANDING_TORSO_Y + 0.2, 0));
 		const push = direction.clone().setY(0).normalize();
@@ -755,8 +875,9 @@ export class Zombie {
 
 		// Чулки порваны — сквозь дыры кожа.
 		const skin = mat('#97a386', 0.7);
-		box(this.group, 0.05, 0.08, 0.01, skin, -0.1, 0.35, 0.056);
-		box(this.group, 0.04, 0.05, 0.01, skin, 0.11, 0.22, 0.054);
+		const [legR, legL] = this.figure.legs;
+		box(legR, 0.05, 0.08, 0.01, skin, 0, 0.35 - LEG_TOP, 0.056);
+		box(legL, 0.04, 0.05, 0.01, skin, 0.01, 0.22 - LEG_TOP, 0.054);
 	}
 
 	/** Брызги крови из точки: count капель назад по выстрелу, вверх и в стороны, с силой power; падая на пол — пятна. */
@@ -801,6 +922,7 @@ export class Zombie {
 		if (this.splats < MAX_SPLATS || radius >= 1) {
 			this.splats++;
 			this.group.parent?.add(splat);
+			this.splatMeshes.push(splat);
 		}
 		return splat;
 	}
