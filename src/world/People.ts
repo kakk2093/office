@@ -79,7 +79,9 @@ class Figure {
 		// Торс в халате: прямоугольный, плотный; грудь — отдельным выступом; воротник — светлее.
 		box(this.body, 0.4, TORSO_HEIGHT, 0.26, coat, 0, base + TORSO_HEIGHT / 2);
 		box(this.body, 0.36, 0.14, 0.07, coat, 0, base + 0.27, 0.15);
-		box(this.body, 0.2, 0.04, 0.2, mat('#ffffff', 0.8), 0, base + TORSO_HEIGHT - 0.01, 0.02);
+		// Воротник: у живых — белый, у мертвецов — под цвет одежды, чуть светлее (у тёмной одежды не белеет).
+		const collar = look.dead ? new THREE.Color(look.coat).multiplyScalar(1.25).getStyle() : '#ffffff';
+		box(this.body, 0.2, 0.04, 0.2, mat(collar, 0.8), 0, base + TORSO_HEIGHT - 0.01, 0.02);
 		for (let i = 0; i < 3; i++) box(this.body, 0.018, 0.018, 0.01, mat('#d8d6cc', 0.5), 0.03, base + 0.08 + i * 0.1, 0.135);
 		if (look.apron) {
 			// Фартук поверх халата — от груди до колен, с завязками на поясе.
@@ -477,6 +479,17 @@ const ATTACK_HIT = 0.5;
 const ATTACK_TIME = 0.85;
 const ATTACK_COOLDOWN = 0.8;
 
+/** Варианты внешности зомби: халаты (белый грязный, салатовый, серо-голубой, бурый), мёртвая кожа, волосы. */
+const ZOMBIE_COATS = ['#b8b29c', '#a4b09a', '#94a0aa', '#a8988a', '#c2bca8', '#8f9a88'];
+/** Тёмная одежда адских зомби (арена): почти чёрная, с оттенками — бурым, серым, багровым, болотным. */
+const ZOMBIE_DARK_COATS = ['#1c1b1d', '#262224', '#2a2320', '#1f2326', '#301c1c', '#23261f'];
+const ZOMBIE_SKINS = ['#97a386', '#8d9a7c', '#a4a08a', '#88948a', '#a89c8a', '#9aa892'];
+const ZOMBIE_HAIR = ['#3b3530', '#6d675d', '#5a3a26', '#2a2420', '#8a7a64'];
+
+function pick<T>(list: T[]): T {
+	return list[Math.floor(Math.random() * list.length)];
+}
+
 interface BloodDrop {
 	mesh: THREE.Mesh;
 	velocity: THREE.Vector3;
@@ -508,16 +521,11 @@ export interface GibBounds {
  * голова, руки по суставам, торс, подол, ноги и ошмётки разлетаются от выстрела, падают и остаются лежать в лужах крови.
  */
 export class Zombie {
-	private readonly figure = new Figure({
-		coat: '#b8b29c',
-		hair: '#3b3530',
-		hairStyle: 'cap',
-		apron: true,
-		skin: '#97a386',
-		dead: true,
-		capTilt: 0.35,
-	});
-	readonly group = this.figure.group;
+	/** Внешность у каждого своя (см. конструктор): халат, кожа, колпак или завивка, фартук, рост и сложение. */
+	private readonly skin = pick(ZOMBIE_SKINS);
+	private readonly coat: string;
+	private readonly figure: Figure;
+	readonly group: THREE.Group;
 	/** Где куски отскакивают от стен; null — не ограничиваем. */
 	bounds: GibBounds | null = null;
 	/** Куда идёт (обычно — к игроку); null — стоит на месте. Останавливается в stopDistance от цели. */
@@ -567,9 +575,28 @@ export class Zombie {
 	/** Пятна крови на полу (с лужей) — чтобы убрать при dispose. */
 	private readonly splatMeshes: THREE.Mesh[] = [];
 
-	constructor() {
+	/**
+	 * dark — адские (для арены): без колпаков и фартуков, в тёмной, почти чёрной одежде, с растрёпанными волосами.
+	 * Иначе — раздатчицы из столовой: грязные светлые халаты, колпак набок или завивка, у многих фартук.
+	 */
+	constructor(dark = false) {
+		this.coat = pick(dark ? ZOMBIE_DARK_COATS : ZOMBIE_COATS);
+		this.figure = new Figure({
+			coat: this.coat,
+			hair: pick(ZOMBIE_HAIR),
+			hairStyle: dark || Math.random() >= 0.65 ? 'perm' : 'cap',
+			apron: !dark && Math.random() < 0.6,
+			skin: this.skin,
+			dead: true,
+			capTilt: (Math.random() - 0.5) * 1.0,
+		});
+		this.group = this.figure.group;
 		this._buildFace();
 		this._buildDamage();
+		// Рост и сложение — чуть разные: кто повыше и худее, кто пониже и шире.
+		const height = 0.9 + Math.random() * 0.2;
+		const width = 0.92 + Math.random() * 0.2;
+		this.group.scale.set(width, height, width);
 	}
 
 	get alive(): boolean {
@@ -855,7 +882,8 @@ export class Zombie {
 		box(b, 0.12, 0.02, 0.1, blood, 0.03, base + TORSO_HEIGHT + 0.005, 0.07);
 
 		// Рваный подол: свисающие лоскуты разной длины.
-		const rag = mat('#a39d86', 0.9);
+		// Лоскуты — того же цвета, что халат, чуть темнее (выгоревшие и грязные).
+		const rag = mat(new THREE.Color(this.coat).multiplyScalar(0.85).getStyle(), 0.9);
 		for (const [angle, length] of [
 			[-0.9, 0.12],
 			[-0.3, 0.08],
@@ -874,7 +902,7 @@ export class Zombie {
 		box(this.figure.armL.hand, 0.074, 0.03, 0.044, blood, 0, -0.07, 0);
 
 		// Чулки порваны — сквозь дыры кожа.
-		const skin = mat('#97a386', 0.7);
+		const skin = mat(this.skin, 0.7);
 		const [legR, legL] = this.figure.legs;
 		box(legR, 0.05, 0.08, 0.01, skin, 0, 0.35 - LEG_TOP, 0.056);
 		box(legL, 0.04, 0.05, 0.01, skin, 0.01, 0.22 - LEG_TOP, 0.054);

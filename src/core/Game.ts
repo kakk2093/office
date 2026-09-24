@@ -10,6 +10,7 @@ import { WindowPortal } from '../render/WindowPortal.js';
 import { Footsteps } from '../audio/Footsteps.js';
 import { Sfx } from '../audio/Sfx.js';
 import { Music } from '../audio/Music.js';
+import { ArenaMusic } from '../audio/ArenaMusic.js';
 import { RainSound } from '../audio/RainSound.js';
 import { DreadAmbient } from '../audio/DreadAmbient.js';
 import { PLAYER_NAME, type Dialogue, type Interaction, type InteractionSound, type Voice } from './Interaction.js';
@@ -21,6 +22,7 @@ import { StartScreen } from '../ui/StartScreen.js';
 import { SawedOff, type ShotgunSound } from '../world/SawedOff.js';
 import { Zombie } from '../world/People.js';
 import { Impacts, type PelletEnd } from '../world/Impacts.js';
+import { Arena, ARENA_RADIUS } from '../world/Arena.js';
 
 /** Отступ от стен, на который не пускаем камеру (стены — не коллайдеры, а простой клэмп по границам). */
 const WALL_MARGIN = 0.4;
@@ -39,6 +41,11 @@ const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, play
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
 const DEBUG_START_AT_CANTEEN = true;
+/** Отладка: начинать сразу на арене (ад) — с обрезом в руках. */
+const DEBUG_START_AT_ARENA = true;
+/** Дальность прорисовки камеры: в помещениях и на улице хватает 100 м, на арене видны горы и небо вдали. */
+const CAMERA_FAR = 100;
+const ARENA_CAMERA_FAR = 600;
 /** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
 const DEBUG_SKIP_INTRO = true;
 /** Отладка: начинать с обрезом в руках (иначе он убран до конца побега в столовой). ЛКМ — дуплет (после него
@@ -63,6 +70,8 @@ const PLAYER_HITS = 6;
 const REGEN_DELAY = 3;
 /** Зомби попадает, если игрок в момент удара не дальше этого, м. */
 const ZOMBIE_HIT_RANGE = 1.6;
+/** Не чаще одного стона зомби за столько секунд — на всех. */
+const GROAN_GAP = 0.35;
 /** Сбой картинки и звука (глитч в реплике): сколько длится, с. */
 const GLITCH_TIME = 0.4;
 /** После «Старт» — столько секунд просто смотрим в окно (без управления), потом начинаются мысли героя. */
@@ -78,7 +87,7 @@ const START_DESCRIPTION = [
 const STREET_HALF = 74;
 
 /** Где сейчас игрок: у каждого места своя сцена и свои коллайдеры, в пространстве они не связаны. */
-type Place = 'office' | 'street' | 'canteen';
+type Place = 'office' | 'street' | 'canteen' | 'arena';
 
 /** Композиция: рендерер, цикл, ресайз. Логика — в Room / Street / PlayerController. */
 export class Game {
@@ -92,9 +101,13 @@ export class Game {
 	private readonly colliders = new CircleColliders();
 	private readonly streetColliders = new CircleColliders();
 	private readonly canteenColliders = new CircleColliders();
+	/** Скалы арены крупные — ячейка сетки больше их диаметра. */
+	private readonly arenaColliders = new CircleColliders(12);
 	private readonly footsteps = new Footsteps();
 	private readonly sfx = new Sfx();
 	private readonly music = new Music();
+	/** На арене вместо лаунжа — злой индастриал-метал, как в Doom. */
+	private readonly arenaMusic = new ArenaMusic();
 	private readonly rainSound = new RainSound();
 	private readonly dreadAmbient = new DreadAmbient();
 	private readonly dialogue = new DialogueBox();
@@ -125,11 +138,14 @@ export class Game {
 	readonly room: Room;
 	readonly street: Street;
 	readonly canteen: Canteen;
+	readonly arena: Arena;
 	readonly player: PlayerController;
 	/** Обрез: висит на камере; убран, пока герой не достанет его в конце побега (или сразу в руках — DEBUG_SHOTGUN). */
 	private readonly shotgun = new SawedOff();
 	/** Сколько ударов получил (к PLAYER_HITS — смерть); сколько секунд без ударов; сила виньетки на экране (плавно). */
 	private hurt = 0;
+	/** Когда звучал последний стон зомби (для GROAN_GAP), с. */
+	private lastGroan = 0;
 	private sinceHurt = 0;
 	private vignetteShown = 0;
 	/** Вспышка виньетки в момент удара, 1 → 0. */
@@ -154,6 +170,7 @@ export class Game {
 		this.room = new Room(this.colliders, this.portal.texture);
 		this.street = new Street(this.streetColliders);
 		this.canteen = new Canteen(this.canteenColliders);
+		this.arena = new Arena(this.arenaColliders);
 		this.player = new PlayerController(this.camera, this.input, this.room, this.colliders);
 		this.player.onStep = (loud) => this.footsteps.play(loud);
 		{
@@ -170,10 +187,11 @@ export class Game {
 				holster: () => this.sfx.shotgunHolster(),
 			};
 			this.shotgun.onSound = (sound) => sounds[sound]();
-			if (!DEBUG_SHOTGUN) this.shotgun.holsterNow();
+			if (!DEBUG_SHOTGUN && !DEBUG_START_AT_ARENA) this.shotgun.holsterNow();
 		}
-		// Зомби столовой — враги (попадания, стоны, удары); выходят в катсцене после разбитого подноса.
-		this._registerCanteenZombies();
+		// Зомби — враги (попадания, стоны, удары): в столовой выходят в катсцене после разбитого подноса, на арене — сразу.
+		this._registerZombies('canteen', this.canteen.zombies);
+		this._registerZombies('arena', this.arena.zombies);
 		if (DEBUG_ZOMBIE) {
 			const zombie = new Zombie();
 			const { x, z } = ZOMBIE_TEST_POSITION;
@@ -188,7 +206,12 @@ export class Game {
 			this.zombies.push({ place: 'office', zombie, collider: this.colliders.add(x, z, 0.35) });
 			zombie.onGroan = () => this._zombieGroan(zombie);
 		}
-		if (DEBUG_START_AT_CANTEEN) {
+		if (DEBUG_START_AT_ARENA) {
+			this.place = 'arena';
+			this.player.colliders = this.arenaColliders;
+			const { spawnPoint } = this.arena;
+			this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
+		} else if (DEBUG_START_AT_CANTEEN) {
 			this.place = 'street';
 			this.player.colliders = this.streetColliders;
 			const { canteenExit } = this.street;
@@ -232,8 +255,10 @@ export class Game {
 		// на стартовом экране). Если игра началась не в офисе — сразу и уличное (дождь, ударные): до жеста их нельзя
 		// включать, иначе удары копятся в приостановленном звуке и потом звучат разом.
 		const startAudio = () => {
-			this.music.start();
-			if (this.place !== 'office') this._startStreetAudio();
+			if (this.place === 'arena') this.arenaMusic.start();
+			else this.music.start();
+			// Дождь и ударные — с улицы и столовой; в аду дождя нет.
+			if (this.place === 'street' || this.place === 'canteen') this._startStreetAudio();
 		};
 		// «Старт» — тоже жест: захватываем мышь; через INTRO_DELAY начнутся мысли героя.
 		this.startScreen.onStart = () => {
@@ -289,6 +314,8 @@ export class Game {
 		else this.player.update(dt);
 		this.dialogue.update(dt);
 		this.room.update(dt);
+		if (this.place === 'arena') this.arena.update(dt, this.camera.position);
+		this._updateCameraFar();
 		this._updateShotgun(dt);
 		this._updateInteraction();
 		this._updateFlash(dt);
@@ -360,11 +387,11 @@ export class Game {
 		return (hit && alive.find((z) => z.owns(hit.object))) ?? null;
 	}
 
-	/** Зомби столовой — в общий список врагов (прежние, если были, — убираем: после перезапуска боя они новые). */
-	private _registerCanteenZombies(): void {
-		for (let i = this.zombies.length - 1; i >= 0; i--) if (this.zombies[i].place === 'canteen') this.zombies.splice(i, 1);
-		for (const zombie of this.canteen.zombies) {
-			this.zombies.push({ place: 'canteen', zombie, collider: null });
+	/** Зомби места — в общий список врагов (прежние этого места, если были, — убираем: после перезапуска боя они новые). */
+	private _registerZombies(place: Place, zombies: Zombie[]): void {
+		for (let i = this.zombies.length - 1; i >= 0; i--) if (this.zombies[i].place === place) this.zombies.splice(i, 1);
+		for (const zombie of zombies) {
+			this.zombies.push({ place, zombie, collider: null });
 			zombie.onGroan = () => this._zombieGroan(zombie);
 			zombie.onAttack = () => this._zombieAttack(zombie);
 		}
@@ -372,7 +399,7 @@ export class Game {
 
 	/** Удар зомби: попал, если игрок рядом (и не идёт переход). Вспышка виньетки, тряска, звук; шестой — смерть. */
 	private _zombieAttack(zombie: Zombie): void {
-		if (this.flashTime !== null || this.place !== 'canteen' || !zombie.alive) return;
+		if (this.flashTime !== null || !zombie.alive) return;
 		const distance = Math.hypot(zombie.group.position.x - this.camera.position.x, zombie.group.position.z - this.camera.position.z);
 		if (distance > ZOMBIE_HIT_RANGE) return;
 		this.hurt++;
@@ -383,7 +410,7 @@ export class Game {
 		if (this.hurt >= PLAYER_HITS) {
 			// Смерть: экран заливает красным, как при переходах, — и бой начинается заново.
 			this.respawning = true;
-			this._beginTransition('canteen');
+			this._beginTransition(this.place);
 		}
 	}
 
@@ -405,6 +432,10 @@ export class Game {
 	private _zombieGroan(zombie: Zombie): void {
 		// До первого клика звук ещё не разрешён — стоны копились бы в приостановленном звуке и потом звучали разом.
 		if (!this.input.isPointerLocked) return;
+		// Когда зомби много — не больше одного стона за GROAN_GAP (иначе сплошная каша).
+		const now = performance.now() / 1000;
+		if (now - this.lastGroan < GROAN_GAP) return;
+		this.lastGroan = now;
 		const to = zombie.group.position.clone().sub(this.camera.position).setY(0);
 		const distance = to.length();
 		const volume = 1 / (1 + 0.15 * distance * distance);
@@ -480,12 +511,22 @@ export class Game {
 	/** Текущая задача по месту: офис — выйти (после вступления), улица — двор и столовая, столовая — своя цепочка. */
 	private _objective(): { text: string; at: THREE.Vector3 | null } | null {
 		if (this.flashTime !== null) return null;
+		if (this.place === 'arena') return this.arena.objective;
 		if (this.place === 'canteen') return this.canteen.objective;
 		if (this.place === 'street') return this.street.objective(this.camera.position);
 		return this.introPending || this.firstObjectiveTimer !== null ? null : this.room.objective;
 	}
 
+	/** Дальность прорисовки — по месту (на арене дальше: горы и небо). */
+	private _updateCameraFar(): void {
+		const far = this.place === 'arena' ? ARENA_CAMERA_FAR : CAMERA_FAR;
+		if (this.camera.far === far) return;
+		this.camera.far = far;
+		this.camera.updateProjectionMatrix();
+	}
+
 	private _scene(): THREE.Scene {
+		if (this.place === 'arena') return this.arena.scene;
 		if (this.place === 'street') return this.street.scene;
 		if (this.place === 'canteen') return this.canteen.scene;
 		return this.room.scene;
@@ -592,6 +633,8 @@ export class Game {
 			};
 		}
 
+		if (this.place === 'arena') return null;
+
 		if (this.place === 'canteen') {
 			// Сначала — предмет в прицеле (подносы, хлеб), потом дверь.
 			const focused = this.canteen.interaction(this.camera);
@@ -671,8 +714,15 @@ export class Game {
 			this.hurt = 0;
 			this.vignetteShown = 0;
 			this.hurtPulse = 0;
+			if (this.place === 'arena') {
+				this.arena.restartFight();
+				this._registerZombies('arena', this.arena.zombies);
+				const { spawnPoint } = this.arena;
+				this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
+				return;
+			}
 			this.canteen.restartFight();
-			this._registerCanteenZombies();
+			this._registerZombies('canteen', this.canteen.zombies);
 			const { fightSpawn } = this.canteen;
 			this.player.spawn(fightSpawn.x, fightSpawn.z, fightSpawn.yaw);
 			return;
@@ -712,6 +762,16 @@ export class Game {
 	/** Клэмп по границам текущей сцены — простой прямоугольник; места не пересекаются в пространстве. */
 	private _clamp(): void {
 		const pos = this.camera.position;
+		if (this.place === 'arena') {
+			// Арена круглая — держим внутри круга (у скал и у края обрыва).
+			const limit = ARENA_RADIUS - WALL_MARGIN;
+			const r = Math.hypot(pos.x, pos.z);
+			if (r > limit) {
+				pos.x *= limit / r;
+				pos.z *= limit / r;
+			}
+			return;
+		}
 		if (this.place === 'street') {
 			pos.x = THREE.MathUtils.clamp(pos.x, -STREET_HALF, STREET_HALF);
 			pos.z = THREE.MathUtils.clamp(pos.z, -STREET_HALF, STREET_HALF);
