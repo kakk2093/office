@@ -19,6 +19,18 @@
 			padding: 12px 28px; border-radius: 8px; pointer-events: none; white-space: nowrap;
 		}
 		#prompt.low { bottom: 8%; }
+		/* Перекрестие обреза: четыре штриха с зазором в центре, с тёмной обводкой — видно и на светлом, и на тёмном. */
+		#crosshair {
+			position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%);
+			display: none; pointer-events: none;
+		}
+		#crosshair span {
+			position: absolute; background: rgba(255, 255, 255, 0.85); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+		}
+		#crosshair span:nth-child(1) { left: 10px; top: 0; width: 2px; height: 6px; }
+		#crosshair span:nth-child(2) { left: 10px; bottom: 0; width: 2px; height: 6px; }
+		#crosshair span:nth-child(3) { top: 10px; left: 0; width: 6px; height: 2px; }
+		#crosshair span:nth-child(4) { top: 10px; right: 0; width: 6px; height: 2px; }
 		#flash {
 			position: fixed; inset: 0; opacity: 0; pointer-events: none;
 		}
@@ -27,6 +39,7 @@
 <body>
 	<div id="hint">Кликни, чтобы осмотреться</div>
 	<div id="prompt"></div>
+	<div id="crosshair"><span></span><span></span><span></span><span></span></div>
 	<div id="flash"></div>
 	<script type="module" src="/src/main.ts"></script>
 </body>

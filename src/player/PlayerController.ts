@@ -15,6 +15,16 @@ const SPRINT_STEP_LENGTH = 1.6;
 const STEP_DOWN = 0.5;
 const MOUSE_SENSITIVITY = 0.002;
 const MAX_PITCH = Math.PI / 2 - 0.01;
+/** Покачивание при ходьбе: подъём глаз к середине шага (м) и крен в сторону шагающей ноги (рад); бегом — сильнее. */
+const BOB_HEIGHT = 0.03;
+const SPRINT_BOB_HEIGHT = 0.045;
+const BOB_ROLL = 0.006;
+/** Тряска от выстрела: подброс взгляда вверх (рад) и дрожь (рад) при силе 1; за сколько секунд затихает. */
+const SHAKE_KICK = 0.05;
+const SHAKE_JITTER = 0.012;
+const SHAKE_TIME = 0.35;
+/** Как быстро покачивание нарастает, когда пошёл, и затихает, когда встал (1/с). */
+const BOB_BLEND = 8;
 
 export interface Ground {
 	getHeightAt(x: number, z: number): number;
@@ -34,6 +44,12 @@ export class PlayerController {
 	/** Высота глаз сидя; null — стоим. Сидя камера неподвижна: взгляд — на стол, пока не встанешь. */
 	private seatedEyeY: number | null = null;
 	private readonly move = new THREE.Vector3();
+	/** Фаза шага: +π за шаг (футфолы — на кратных π, как и звук шага); сила покачивания 0..1 и его размах. */
+	bobPhase = 0;
+	bobWeight = 0;
+	private bobHeight = BOB_HEIGHT;
+	/** Сила тряски 0..1 — поверх взгляда, сам yaw/pitch не меняет (прицел после тряски на месте). */
+	private shakeAmount = 0;
 
 	constructor(
 		private readonly camera: THREE.PerspectiveCamera,
@@ -84,7 +100,13 @@ export class PlayerController {
 		this._applyRotation();
 	}
 
+	/** Тряхнуть камеру (выстрел): strength 1 — полная. */
+	shake(strength = 1): void {
+		this.shakeAmount = Math.max(this.shakeAmount, strength);
+	}
+
 	update(dt: number): void {
+		this.shakeAmount = Math.max(0, this.shakeAmount - dt / SHAKE_TIME);
 		this._updateLook();
 		if (this.seatedEyeY !== null) return;
 		this._updateMovement(dt);
@@ -96,8 +118,21 @@ export class PlayerController {
 		return this.ground.getHeightAt(x, z) + EYE_HEIGHT;
 	}
 
+	/** Смещение глаз от покачивания сейчас (м): внизу — в момент шага, выше всего — в середине. */
+	private _bobY(): number {
+		return Math.abs(Math.sin(this.bobPhase)) * this.bobHeight * this.bobWeight;
+	}
+
 	private _applyRotation(): void {
-		this.camera.rotation.set(this.pitch, this.yaw, 0);
+		// Лёгкий крен в такт шагам: в сторону то одной, то другой ноги.
+		// Тряска: взгляд подбрасывает вверх и он возвращается, плюс мелкая дрожь; квадрат — резкий толчок, мягкий спад.
+		const shake = this.shakeAmount * this.shakeAmount;
+		const jitter = () => (Math.random() * 2 - 1) * SHAKE_JITTER * shake;
+		this.camera.rotation.set(
+			this.pitch + shake * SHAKE_KICK + jitter(),
+			this.yaw + jitter(),
+			Math.sin(this.bobPhase) * BOB_ROLL * this.bobWeight + jitter()
+		);
 		this.forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
 	}
 
@@ -112,8 +147,8 @@ export class PlayerController {
 		if (this.grounded) {
 			// Идём по земле: липнем к ней при небольшом спуске, иначе начинаем падать.
 			const targetY = this._groundEyeY();
-			if (pos.y - targetY <= STEP_DOWN) {
-				pos.y = targetY;
+			if (pos.y - targetY - this._bobY() <= STEP_DOWN) {
+				pos.y = targetY + this._bobY();
 				return;
 			}
 			this.grounded = false;
@@ -162,14 +197,21 @@ export class PlayerController {
 		this.colliders.resolve(pos, RADIUS);
 
 		// Шаги считаем по реально пройденному пути (упор в препятствие не даёт шагов).
+		const moved = Math.hypot(pos.x - startX, pos.z - startZ);
+		const sprint = input.isDown('ShiftLeft');
 		if (this.grounded) {
-			const sprint = input.isDown('ShiftLeft');
 			const stepLength = sprint ? SPRINT_STEP_LENGTH : STEP_LENGTH;
-			this.stepDistance += Math.hypot(pos.x - startX, pos.z - startZ);
+			this.stepDistance += moved;
+			this.bobPhase += (moved / stepLength) * Math.PI;
 			if (this.stepDistance >= stepLength) {
 				this.stepDistance -= stepLength;
 				this.onStep?.(sprint ? 1.3 : 1);
 			}
 		}
+		// Покачивание — только пока идём по земле; остановился или в прыжке — плавно затихает.
+		const walking = this.grounded && moved > 0.0005;
+		this.bobWeight += ((walking ? 1 : 0) - this.bobWeight) * (1 - Math.exp(-dt * BOB_BLEND));
+		this.bobHeight += ((sprint ? SPRINT_BOB_HEIGHT : BOB_HEIGHT) - this.bobHeight) * (1 - Math.exp(-dt * BOB_BLEND));
+		this._applyRotation();
 	}
 }

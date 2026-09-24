@@ -135,6 +135,12 @@ export class StartScreen {
 		return step;
 	}
 
+	/** Убрать экран сразу, без onStart (отладка: старт без стартового экрана). */
+	skip(): void {
+		this.started = true;
+		this.root.remove();
+	}
+
 	private _start(): void {
 		if (this.started) return;
 		this.started = true;

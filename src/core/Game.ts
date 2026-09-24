@@ -18,6 +18,9 @@ import { ObjectiveHud } from '../ui/ObjectiveHud.js';
 import { TargetMarker } from '../ui/TargetMarker.js';
 import { Letterbox, LETTERBOX_SLIDE_TIME } from '../ui/Letterbox.js';
 import { StartScreen } from '../ui/StartScreen.js';
+import { SawedOff, type ShotgunSound } from '../world/SawedOff.js';
+import { Zombie } from '../world/People.js';
+import { Impacts, type PelletEnd } from '../world/Impacts.js';
 
 /** Отступ от стен, на который не пускаем камеру (стены — не коллайдеры, а простой клэмп по границам). */
 const WALL_MARGIN = 0.4;
@@ -36,6 +39,22 @@ const VOICE_PITCH: Record<Voice, number> = { dinnerLady: 330, cashier: 260, play
 const MUSIC_FADE_TIME = 5;
 /** Отладка: начинать не в офисе, а на улице перед входом в столовую, лицом к двери. */
 const DEBUG_START_AT_CANTEEN = false;
+/** Отладка: без стартового экрана и вступления — сразу в геймплей (мышь захватывается по клику в игру). */
+const DEBUG_SKIP_INTRO = true;
+/** Отладка: обрез в руках, ЛКМ — дуплет (после него сама перезарядка), R — перезарядка. */
+const DEBUG_SHOTGUN = true;
+/** Обрез в руках — в координатах камеры: справа внизу, дулом чуть к центру экрана. */
+const SHOTGUN_HELD_POSITION = new THREE.Vector3(0.16, -0.17, -0.42);
+const SHOTGUN_HELD_YAW = 0.06;
+/** Размах покачивания обреза при ходьбе, м (в координатах камеры). */
+const SHOTGUN_BOB = 0.01;
+/** Отладка: зомби-раздатчица в офисе — стоит в свободном углу, лицом к месту старта. */
+const DEBUG_ZOMBIE = true;
+const ZOMBIE_TEST_POSITION = { x: 1.5, z: 2 };
+/** Дуплет: по 9 дробин из ствола (только эффект — попадание считает один луч); разброс — угол конуса, рад; дальше дробь не летит. */
+const PELLETS = 18;
+const PELLET_SPREAD = 0.06;
+const PELLET_RANGE = 40;
 /** Сбой картинки и звука (глитч в реплике): сколько длится, с. */
 const GLITCH_TIME = 0.4;
 /** После «Старт» — столько секунд просто смотрим в окно (без управления), потом начинаются мысли героя. */
@@ -77,6 +96,7 @@ export class Game {
 	private readonly hint = document.getElementById('hint')!;
 	private readonly prompt = document.getElementById('prompt')!;
 	private readonly flash = document.getElementById('flash')!;
+	private readonly crosshair = document.getElementById('crosshair')!;
 	/** Время с начала перехода, с; null — переход не идёт. */
 	private flashTime: number | null = null;
 	private flashTeleported = false;
@@ -98,6 +118,13 @@ export class Game {
 	readonly street: Street;
 	readonly canteen: Canteen;
 	readonly player: PlayerController;
+	/** Обрез в руках (пока только для отладки, см. DEBUG_SHOTGUN): висит на камере. */
+	private readonly shotgun: SawedOff | null = null;
+	/** Враги по местам (пока только тестовый зомби в офисе). */
+	private readonly zombies: { place: Place; zombie: Zombie }[] = [];
+	private readonly raycaster = new THREE.Raycaster();
+	/** Росчерки дроби, следы на стенах, пыль. */
+	private readonly impacts = new Impacts();
 
 	constructor() {
 		this.renderer.setPixelRatio(1);
@@ -110,6 +137,30 @@ export class Game {
 		this.canteen = new Canteen(this.canteenColliders);
 		this.player = new PlayerController(this.camera, this.input, this.room, this.colliders);
 		this.player.onStep = (loud) => this.footsteps.play(loud);
+		if (DEBUG_SHOTGUN) {
+			this.shotgun = new SawedOff();
+			this.shotgun.group.position.copy(SHOTGUN_HELD_POSITION);
+			this.shotgun.group.rotation.y = SHOTGUN_HELD_YAW;
+			this.camera.add(this.shotgun.group);
+			const sounds: Record<ShotgunSound, () => void> = {
+				shot: () => this.sfx.shotgun(),
+				open: () => this.sfx.shotgunOpen(),
+				eject: () => this.sfx.shotgunEject(),
+				insert: () => this.sfx.shotgunInsert(),
+				close: () => this.sfx.shotgunClose(),
+			};
+			this.shotgun.onSound = (sound) => sounds[sound]();
+		}
+		if (DEBUG_ZOMBIE) {
+			const zombie = new Zombie();
+			const { x, z } = ZOMBIE_TEST_POSITION;
+			const { spawnPoint } = this.room;
+			zombie.group.position.set(x, 0, z);
+			zombie.group.rotation.y = Math.atan2(spawnPoint.x - x, spawnPoint.z - z);
+			this.room.scene.add(zombie.group);
+			this.colliders.add(x, z, 0.35);
+			this.zombies.push({ place: 'office', zombie });
+		}
 		if (DEBUG_START_AT_CANTEEN) {
 			this.place = 'street';
 			this.player.colliders = this.streetColliders;
@@ -118,7 +169,7 @@ export class Game {
 		} else {
 			const { spawnPoint } = this.room;
 			this.player.spawn(spawnPoint.x, spawnPoint.z, spawnPoint.yaw);
-			this.introPending = true;
+			this.introPending = !DEBUG_SKIP_INTRO;
 		}
 		// Кинорамка — на каждый диалог (и на вступление: выезжает вместе с ним, через секунду после «Старт»).
 		this.letterbox = new Letterbox();
@@ -156,6 +207,7 @@ export class Game {
 			this.input.lockPointer();
 			if (this.introPending) this.introTimer = INTRO_DELAY;
 		};
+		if (DEBUG_SKIP_INTRO) this.startScreen.skip();
 		window.addEventListener('pointerdown', startAudio, { once: true });
 		window.addEventListener('keydown', startAudio, { once: true });
 
@@ -204,6 +256,7 @@ export class Game {
 		else this.player.update(dt);
 		this.dialogue.update(dt);
 		this.room.update(dt);
+		this._updateShotgun(dt);
 		this._updateInteraction();
 		this._updateFlash(dt);
 		this._clamp();
@@ -219,6 +272,78 @@ export class Game {
 
 		this.post.render(this._scene(), this.camera);
 		this.input.endFrame();
+	}
+
+	/** Обрез в руках: камера с ним должна быть в сцене текущего места (иначе дочерние объекты не рисуются).
+	 * ЛКМ — дуплет, R — перезарядка; не во время разговора, перехода, вступления и катсцен, а за столом ЛКМ — ложка. */
+	private _updateShotgun(dt: number): void {
+		if (!this.shotgun) return;
+		const scene = this._scene();
+		if (this.camera.parent !== scene) scene.add(this.camera);
+		// Обрез покачивается в такт шагам: из стороны в сторону и чуть отстаёт вниз, когда глаза поднимаются.
+		const { bobPhase, bobWeight } = this.player;
+		this.shotgun.group.position.set(
+			SHOTGUN_HELD_POSITION.x + Math.sin(bobPhase) * SHOTGUN_BOB * bobWeight,
+			SHOTGUN_HELD_POSITION.y - Math.abs(Math.sin(bobPhase)) * SHOTGUN_BOB * bobWeight,
+			SHOTGUN_HELD_POSITION.z
+		);
+		const canteenBusy = this.place === 'canteen' && (this.canteen.eating || this.canteen.cutsceneActive);
+		const canUse = !this.dialogue.active && !this.introPending && this.flashTime === null && !canteenBusy;
+		// Перекрестие — когда из обреза можно стрелять (и мышь захвачена: без неё взгляд не наводится).
+		this.crosshair.style.display = canUse && this.input.isPointerLocked ? 'block' : 'none';
+		if (canUse && this.input.consumePress('Mouse0') && this.shotgun.fire()) {
+			this.player.shake();
+			this._shoot(scene);
+		}
+		if (canUse && this.input.consumePress('KeyR')) this.shotgun.reload();
+		this.shotgun.update(dt);
+		for (const { place, zombie } of this.zombies) if (place === this.place) zombie.update(dt);
+		this.impacts.update(dt);
+	}
+
+	/**
+	 * Выстрел: попадание решает один луч из центра экрана — до первого видимого меша (сам обрез на камере не в счёт);
+	 * попал в живого зомби — hit. Дробь — только эффект: PELLETS росчерков от дульного среза с разбросом; если луч
+	 * упёрся в поверхность, дробины ложатся на её плоскость вокруг точки попадания и оставляют следы.
+	 */
+	private _shoot(scene: THREE.Scene): void {
+		const origin = this.camera.getWorldPosition(new THREE.Vector3());
+		const forward = this.camera.getWorldDirection(new THREE.Vector3());
+		this.raycaster.set(origin, forward);
+		this.raycaster.far = PELLET_RANGE;
+		const targets = scene.children.filter((o) => o !== this.camera);
+		const hit = this.raycaster.intersectObjects(targets, true).find((h) => h.object instanceof THREE.Mesh && isShown(h.object));
+		const target = hit && this.zombies.find(({ place, zombie }) => place === this.place && zombie.alive && zombie.owns(hit.object));
+		if (hit && target) {
+			target.zombie.hit(hit.point, forward);
+			this.sfx.flesh();
+		}
+
+		// Плоскость, на которую ложится дробь: поверхность под лучом, нормалью к стрелку. По зомби следов нет — там кровь.
+		// По лежащему телу — тоже нет: следы повисли бы в воздухе вокруг него.
+		const onZombie = hit && this.zombies.some(({ zombie }) => zombie.owns(hit.object));
+		let plane: THREE.Plane | null = null;
+		if (hit?.face && !onZombie) {
+			const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+			if (normal.dot(forward) > 0) normal.negate();
+			plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, hit.point);
+		}
+		const right = new THREE.Vector3().crossVectors(forward, this.camera.up).normalize();
+		const up = new THREE.Vector3().crossVectors(right, forward);
+		const ray = new THREE.Ray();
+		const ends: PelletEnd[] = [];
+		for (let i = 0; i < PELLETS; i++) {
+			// Равномерно по кругу конуса: радиус — корень из случайного.
+			const r = Math.sqrt(Math.random()) * PELLET_SPREAD;
+			const a = Math.random() * Math.PI * 2;
+			ray.set(origin, forward.clone().addScaledVector(right, Math.cos(a) * r).addScaledVector(up, Math.sin(a) * r).normalize());
+			const point = new THREE.Vector3();
+			const onPlane = plane && ray.intersectPlane(plane, point) && point.distanceTo(origin) <= PELLET_RANGE;
+			if (onPlane) ends.push({ point, normal: plane!.normal });
+			else if (hit && onZombie) ends.push({ point: ray.at(hit.distance, point), normal: null });
+			else ends.push({ point: ray.at(PELLET_RANGE, point), normal: null });
+		}
+		this.impacts.shot(scene, this.shotgun!.muzzle(new THREE.Vector3()), ends);
 	}
 
 	/** Глитч: сила скачет от кадра к кадру (то сильный сбой, то почти чисто) и к концу спадает; картинка каждый кадр новая. */
@@ -468,4 +593,10 @@ export class Game {
 		this.camera.aspect = window.innerWidth / window.innerHeight;
 		this.camera.updateProjectionMatrix();
 	}
+}
+
+/** Объект и все его родители видимы — скрытое дробь не задевает. */
+function isShown(object: THREE.Object3D): boolean {
+	for (let o: THREE.Object3D | null = object; o; o = o.parent) if (!o.visible) return false;
+	return true;
 }

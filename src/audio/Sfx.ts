@@ -523,6 +523,183 @@ export class Sfx {
 		hit.start(start);
 	}
 
+	/**
+	 * Дуплет из обреза — тяжёлый: два почти слитых выстрела (второй на 12 мс позже). В каждом — короткий треск,
+	 * плотный «хлопок» шума с быстро темнеющим фильтром и низкий удар в грудь (синус с падающим тоном, до ~30 Гц).
+	 * Поверх — длинный глухой раскат, как эхо в помещении. Лёгкое насыщение — только на низком ударе (плотнее,
+	 * без хрипа в шуме); всё вместе — через компрессор, чтобы не клиппило.
+	 */
+	shotgun(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const drive = ctx.createWaveShaper();
+		const curve = new Float32Array(1024);
+		for (let i = 0; i < curve.length; i++) curve[i] = Math.tanh(((i / (curve.length - 1)) * 2 - 1) * 1.3);
+		drive.curve = curve;
+		const comp = ctx.createDynamicsCompressor();
+		comp.threshold.value = -8;
+		comp.ratio.value = 4;
+		comp.attack.value = 0.004;
+		comp.release.value = 0.25;
+		const master = ctx.createGain();
+		master.gain.value = 0.9;
+		drive.connect(comp);
+		comp.connect(master);
+		master.connect(ctx.destination);
+		const t0 = ctx.currentTime + 0.005;
+
+		for (const [delay, level] of [
+			[0, 1],
+			[0.012, 0.85],
+		] as const) {
+			const t = t0 + delay;
+			// Треск — коротко и не слишком высоко, чтобы не звучало как хлопушка.
+			const crack = this._noiseBurst(0.03);
+			const band = ctx.createBiquadFilter();
+			band.type = 'bandpass';
+			band.frequency.value = 2200;
+			band.Q.value = 0.7;
+			const crackGain = ctx.createGain();
+			crackGain.gain.setValueAtTime(0.5 * level, t);
+			crackGain.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+			crack.connect(band);
+			band.connect(crackGain);
+			crackGain.connect(comp);
+			crack.start(t);
+
+			// Хлопок: шум, фильтр быстро закрывается — от яркого к глухому.
+			const blast = this._noiseBurst(0.4);
+			const low = ctx.createBiquadFilter();
+			low.type = 'lowpass';
+			low.frequency.setValueAtTime(3000, t);
+			low.frequency.exponentialRampToValueAtTime(250, t + 0.25);
+			const blastGain = ctx.createGain();
+			blastGain.gain.setValueAtTime(0.9 * level, t);
+			blastGain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+			blast.connect(low);
+			low.connect(blastGain);
+			blastGain.connect(comp);
+			blast.start(t);
+
+			// Низкий удар: синус и треугольник с падающим тоном — «вес» выстрела.
+			for (const [type, from, to, gain, decay] of [
+				['sine', 110, 32, 1.4, 0.55],
+				['triangle', 65, 28, 0.6, 0.4],
+			] as const) {
+				const osc = ctx.createOscillator();
+				osc.type = type;
+				osc.frequency.setValueAtTime(from, t);
+				osc.frequency.exponentialRampToValueAtTime(to, t + 0.35);
+				const g = ctx.createGain();
+				g.gain.setValueAtTime(gain * level, t);
+				g.gain.exponentialRampToValueAtTime(0.001, t + decay);
+				osc.connect(g);
+				g.connect(drive);
+				osc.start(t);
+				osc.stop(t + decay + 0.02);
+			}
+		}
+
+		// Раскат: глухой шум, быстро нарастает и долго гаснет — эхо.
+		const tail = this._noiseBurst(1.5);
+		const tailLow = ctx.createBiquadFilter();
+		tailLow.type = 'lowpass';
+		tailLow.frequency.setValueAtTime(700, t0);
+		tailLow.frequency.exponentialRampToValueAtTime(160, t0 + 1.4);
+		const tailGain = ctx.createGain();
+		tailGain.gain.setValueAtTime(0.0001, t0);
+		tailGain.gain.linearRampToValueAtTime(0.22, t0 + 0.04);
+		tailGain.gain.exponentialRampToValueAtTime(0.001, t0 + 1.5);
+		tail.connect(tailLow);
+		tailLow.connect(tailGain);
+		tailGain.connect(comp);
+		tail.start(t0);
+	}
+
+	/** Дробь попала в тело: глухой влажный шлепок — низкий шум с быстрым спадом и короткий «чавк» повыше. */
+	flesh(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.02;
+		const thud = this._noiseBurst(0.12);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.setValueAtTime(700, t);
+		low.frequency.exponentialRampToValueAtTime(150, t + 0.1);
+		const gain = ctx.createGain();
+		gain.gain.setValueAtTime(0.6, t);
+		gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+		thud.connect(low);
+		low.connect(gain);
+		gain.connect(ctx.destination);
+		thud.start(t);
+		this._soft(t + 0.01, 0.1, 1300, 0.12);
+	}
+
+	/** Обрез переламывают: щелчок рычага запирания и металлический лязг стволов на шарнире. */
+	shotgunOpen(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._latch(ctx.destination, t);
+		this._clack(t + 0.12, [1100, 2600], 0.25, 0.07);
+	}
+
+	/** Экстракторы выкидывают две гильзы: лёгкий лязг, потом гильзы звякают об пол. */
+	shotgunEject(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._clack(t, [1800, 3900], 0.15, 0.05);
+		for (const delay of [0.38, 0.46, 0.6]) this._clack(t + delay, [2900 + Math.random() * 800, 5200], 0.07, 0.06);
+	}
+
+	/** Патрон досылают в патронник: пластиковый шорох и глухой щелчок закраины. */
+	shotgunInsert(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._soft(t, 0.08, 2200, 0.06);
+		this._clack(t + 0.06, [900, 2000], 0.18, 0.04);
+	}
+
+	/** Стволы защёлкивают: тяжёлый металлический «клац» и низкий стук. */
+	shotgunClose(): void {
+		const ctx = this._context();
+		if (ctx.state === 'suspended') void ctx.resume();
+		const t = ctx.currentTime + 0.01;
+		this._clack(t, [700, 1900, 3100], 0.35, 0.09);
+		const thud = this._noiseBurst(0.04);
+		const low = ctx.createBiquadFilter();
+		low.type = 'lowpass';
+		low.frequency.value = 300;
+		const gain = ctx.createGain();
+		gain.gain.value = 0.5;
+		thud.connect(low);
+		low.connect(gain);
+		gain.connect(ctx.destination);
+		thud.start(t);
+	}
+
+	/** Короткий металлический стук: щелчок шума через узкие резонансы на заданных частотах. */
+	private _clack(start: number, freqs: number[], level: number, decay: number): void {
+		const ctx = this._context();
+		const hit = this._noiseBurst(0.01);
+		for (const freq of freqs) {
+			const ring = ctx.createBiquadFilter();
+			ring.type = 'bandpass';
+			ring.frequency.value = freq;
+			ring.Q.value = 12;
+			const gain = ctx.createGain();
+			gain.gain.setValueAtTime(level * 3, start);
+			gain.gain.exponentialRampToValueAtTime(0.001, start + decay);
+			hit.connect(ring);
+			ring.connect(gain);
+			gain.connect(ctx.destination);
+		}
+		hit.start(start);
+	}
+
 	/** Короткий всплеск белого шума с затуханием к концу. */
 	private _noiseBurst(duration: number): AudioBufferSourceNode {
 		const ctx = this._context();
