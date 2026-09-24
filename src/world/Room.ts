@@ -2,21 +2,54 @@ import * as THREE from 'three';
 import type { CircleColliders } from '../physics/CircleColliders.js';
 import {
 	createDesk,
-	createMonitor,
 	createChair,
 	createWindow,
 	createAcUnit,
-	createMug,
-	createKeyboard,
-	createMouse,
 	createMuralTexture,
 	createDoor,
+	createFirstAidCabinet,
+	createWhiteboard,
+	createWallShelves,
+	createCeilingTileTexture,
 } from './Furniture.js';
+import {
+	createMonitor,
+	createLaptop,
+	createKeyboard,
+	createMouse,
+	createMousePad,
+	createMug,
+	createPaperCup,
+	createPaperStack,
+	createNotebook,
+	createStickyPad,
+	createStickyNote,
+	createDeskPlant,
+	createHeadphones,
+	createWaterBottle,
+	createPhone,
+	createCan,
+	createDeskLamp,
+	createScreenTexture,
+	type ScreenKind,
+} from './DeskItems.js';
 
 const WIDTH = 10;
 const DEPTH = 12;
 const HEIGHT = 3;
 const WALL_THICKNESS = 0.2;
+/** Сторона плиты подвесного потолка. */
+const CEILING_TILE = 0.6;
+/** Центры клеток потолка под светильники (швы сетки идут через 0 с шагом CEILING_TILE): два ряда над блоками столов,
+ * вдоль комнаты — через клетку-две. */
+const LAMP_X = [-2.1, 2.1];
+const LAMP_Z = [-4.5, -2.7, -0.9, 0.9, 2.7, 4.5];
+/** У каких светильников есть точечный свет [z, отбрасывает тень]. */
+const LIGHT_Z: [number, boolean][] = [
+	[-2.7, true],
+	[0.9, true],
+	[4.5, false],
+];
 /** Верх столешницы: createDesk кладёт её центр в y=0.74 при толщине 0.04. */
 const DESK_SURFACE_Y = 0.76;
 /** Столы в ряду стоят вплотную: шаг равен длине стола (вдвое длиннее обычного). Всего 2 ряда по 3 — 6 столов. */
@@ -26,6 +59,9 @@ const SEAT_SPACING = DESK_LENGTH;
 const ROW_CENTER_Z = -1.2;
 /** Половина ширины столешницы (0.7) — на этот шаг раздвинуты 2 колонки блока, чтобы столы касались краями. */
 const DESK_HALF_WIDTH = 0.35;
+const SCREEN_KINDS: ScreenKind[] = ['code', 'game', 'art', 'desktop'];
+const MUG_COLORS = ['#c94f3d', '#2c5aa0', '#f2f2ee', '#3fa35a', '#f4d94a', '#26282b', '#e27a9a'];
+const STICKY_COLORS = ['#f4e04a', '#f29ab8', '#8fd3f0', '#a8e07a'];
 
 /** Дверь в восточной стене: реальный вырез (проём), полотно открывается по E.
  * Сама улица — отдельная сцена (см. Street), сюда не пристроена: за дверью просто небо в проёме. */
@@ -71,6 +107,8 @@ export class Room {
 	private doorAnimFrom = this.doorClosedRot;
 	private doorAnimTo = this.doorClosedRot;
 	private doorAnimT = 1;
+	/** Номер рабочего места — зерно для разброса, чтобы столы отличались, но одинаково при каждом запуске. */
+	private seatIndex = 0;
 
 	get isDoorOpen(): boolean {
 		return this.doorOpenState;
@@ -89,7 +127,9 @@ export class Room {
 		this._buildShell();
 		this._buildWindows();
 		this._buildAc();
+		this._buildSouthWallDecor();
 		this._buildDoor();
+		this._buildCeilingLights();
 		this._buildDeskBlock(-1.9);
 		this._buildDeskBlock(1.9);
 	}
@@ -116,8 +156,6 @@ export class Room {
 			{ length: SEATS_PER_ROW },
 			(_, i) => ROW_CENTER_Z + (i - (SEATS_PER_ROW - 1) / 2) * SEAT_SPACING
 		);
-		this._buildCeilingLamp(centerX - DESK_HALF_WIDTH, seatZ[1]);
-		this._buildCeilingLamp(centerX + DESK_HALF_WIDTH, seatZ[1]);
 		this._buildDeskRow(centerX - DESK_HALF_WIDTH, seatZ, -1);
 		this._buildDeskRow(centerX + DESK_HALF_WIDTH, seatZ, 1);
 	}
@@ -133,7 +171,10 @@ export class Room {
 		floor.receiveShadow = true;
 		this.scene.add(floor);
 
-		const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(WIDTH, DEPTH), new THREE.MeshStandardMaterial({ color: '#f2f2f0' }));
+		// Сетку плит сдвигаем так, чтобы швы шли через центр комнаты: светильники встают ровно в клетки (см. LAMP_X/LAMP_Z).
+		const ceilingTex = createCeilingTileTexture(WIDTH / CEILING_TILE, DEPTH / CEILING_TILE);
+		ceilingTex.offset.set(-((WIDTH / 2) % CEILING_TILE) / CEILING_TILE, -((DEPTH / 2) % CEILING_TILE) / CEILING_TILE);
+		const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(WIDTH, DEPTH), new THREE.MeshStandardMaterial({ map: ceilingTex }));
 		ceiling.rotation.x = Math.PI / 2;
 		ceiling.position.y = HEIGHT;
 		this.scene.add(ceiling);
@@ -176,11 +217,15 @@ export class Room {
 	}
 
 	private _buildWindows(): void {
-		for (const z of [-3, 1]) {
-			const pane = createWindow(1.8, 1.4);
-			pane.position.set(-WIDTH / 2 + WALL_THICKNESS / 2 + 0.01, 1.6, z);
-			pane.rotation.y = Math.PI / 2;
-			this.scene.add(pane);
+		// На одном окне приспущены жалюзи, на подоконнике другого — цветок.
+		for (const [z, options] of [
+			[-3, { blinds: 0.35, seed: 1 }],
+			[1, { plant: true, seed: 2 }],
+		] as const) {
+			const win = createWindow(1.8, 1.4, options);
+			win.position.set(-WIDTH / 2 + WALL_THICKNESS / 2 + 0.01, 1.6, z);
+			win.rotation.y = Math.PI / 2;
+			this.scene.add(win);
 		}
 	}
 
@@ -190,6 +235,21 @@ export class Room {
 		this.scene.add(ac);
 	}
 
+	/** Южная стена — справа от двери, если стоять к ней лицом: у двери аптечка, по центру маркерная доска
+	 * с глобусом, дальше навесные полки с мелочёвкой. Всё вешается на внутреннюю грань стены лицом в комнату. */
+	private _buildSouthWallDecor(): void {
+		const wallZ = DEPTH / 2 - WALL_THICKNESS / 2;
+		for (const [item, x, y] of [
+			[createFirstAidCabinet(), WIDTH / 2 - 0.9, 1.5],
+			[createWhiteboard(3.2, 1.5), 0.8, 1.6],
+			[createWallShelves(), -3.0, 1.2],
+		] as const) {
+			item.position.set(x, y, wallZ);
+			item.rotation.y = Math.PI;
+			this.scene.add(item);
+		}
+	}
+
 	/** Полотно двери (закрыто по умолчанию), петля — на северном крае проёма. */
 	private _buildDoor(): void {
 		this.doorLeaf.position.set(WIDTH / 2 - WALL_THICKNESS / 2 - 0.01, 0, this.doorway.zMin);
@@ -197,22 +257,38 @@ export class Room {
 		this.scene.add(this.doorLeaf);
 	}
 
-	/** Потолочный светильник над рядом столов: светящаяся панель + яркий точечный свет. */
-	private _buildCeilingLamp(x: number, z: number): void {
-		const panel = new THREE.Mesh(
-			new THREE.BoxGeometry(1.6, 0.04, 0.5),
-			new THREE.MeshStandardMaterial({ color: '#fff8e6', emissive: '#fff8e6', emissiveIntensity: 1.4 })
-		);
-		panel.position.set(x, HEIGHT - 0.03, z);
-		this.scene.add(panel);
-
-		const light = new THREE.PointLight('#fff3d8', 12, 8, 2);
-		light.position.set(x, HEIGHT - 0.25, z);
-		light.castShadow = true;
-		this.scene.add(light);
+	/** Встроенные квадратные светильники в клетках потолка — сетка над блоками столов; точечный свет — у части из них. */
+	private _buildCeilingLights(): void {
+		for (const x of LAMP_X) {
+			for (const z of LAMP_Z) this._buildCeilingLamp(x, z);
+		}
+		for (const x of LAMP_X) {
+			for (const [z, shadow] of LIGHT_Z) {
+				const light = new THREE.PointLight('#fff3d8', 9, 8, 2);
+				light.position.set(x, HEIGHT - 0.25, z);
+				light.castShadow = shadow;
+				this.scene.add(light);
+			}
+		}
 	}
 
-	/** Ряд рабочих мест: отдельный стол на каждое место (монитор/клавиатура/мышь/кружка) + стул.
+	/** Светильник-панель во всю плиту потолка: белая рамка и светящийся рассеиватель. */
+	private _buildCeilingLamp(x: number, z: number): void {
+		const frame = new THREE.Mesh(
+			new THREE.BoxGeometry(CEILING_TILE - 0.02, 0.02, CEILING_TILE - 0.02),
+			new THREE.MeshStandardMaterial({ color: '#e4e3de' })
+		);
+		frame.position.set(x, HEIGHT - 0.01, z);
+		this.scene.add(frame);
+		const diffuser = new THREE.Mesh(
+			new THREE.BoxGeometry(CEILING_TILE - 0.1, 0.01, CEILING_TILE - 0.1),
+			new THREE.MeshStandardMaterial({ color: '#fff8e6', emissive: '#fff8e6', emissiveIntensity: 1.4 })
+		);
+		diffuser.position.set(x, HEIGHT - 0.022, z);
+		this.scene.add(diffuser);
+	}
+
+	/** Ряд рабочих мест: отдельный стол на каждое место + стул; что на столе — см. _buildWorkstation.
 	 * chairSide — в какую сторону от центра блока вынесен стул (наружу блока). */
 	private _buildDeskRow(x: number, seatZ: number[], chairSide: -1 | 1): void {
 		for (const z of seatZ) {
@@ -223,23 +299,7 @@ export class Room {
 			this.colliders.add(x, z - DESK_LENGTH / 4, 0.5);
 			this.colliders.add(x, z + DESK_LENGTH / 4, 0.5);
 
-			const monitor = createMonitor();
-			monitor.position.set(x - chairSide * 0.15, DESK_SURFACE_Y, z);
-			monitor.rotation.y = chairSide > 0 ? -Math.PI / 2 : Math.PI / 2;
-			this.scene.add(monitor);
-
-			const keyboard = createKeyboard();
-			keyboard.position.set(x - chairSide * 0.02, DESK_SURFACE_Y + 0.01, z - 0.02);
-			keyboard.rotation.y = Math.PI / 2;
-			this.scene.add(keyboard);
-
-			const mouse = createMouse();
-			mouse.position.set(x - chairSide * 0.02, DESK_SURFACE_Y + 0.015, z + 0.14);
-			this.scene.add(mouse);
-
-			const mug = createMug();
-			mug.position.set(x - chairSide * 0.25, DESK_SURFACE_Y, z - 0.15);
-			this.scene.add(mug);
+			this._buildWorkstation(x, z, chairSide);
 
 			const chair = createChair();
 			chair.position.set(x + chairSide * 0.85, 0, z);
@@ -247,5 +307,100 @@ export class Room {
 			this.scene.add(chair);
 			this.colliders.add(chair.position.x, chair.position.z, 0.3);
 		}
+	}
+
+	/**
+	 * Что стоит на столе у одного места. Сидящий смотрит в сторону −chairSide по X; d — отступ от центра стола
+	 * к монитору, l — вправо от сидящего. Техника у всех своя (один/два монитора, монитор + ноутбук),
+	 * мышь справа на коврике (у одного — слева), кружка и мелочёвка в случайных свободных местах.
+	 */
+	private _buildWorkstation(x: number, z: number, s: -1 | 1): void {
+		const index = this.seatIndex++;
+		let seed = index * 9301 + 49297;
+		const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+		const pick = <T,>(list: readonly T[]): T => list[Math.floor(rand() * list.length)];
+		// Локальный +Z предмета смотрит на сидящего, локальный +X — вправо от него.
+		const yaw = (s * Math.PI) / 2;
+		const put = (obj: THREE.Object3D, d: number, l: number, rot = 0) => {
+			obj.position.set(x - s * d, DESK_SURFACE_Y, z - s * l);
+			obj.rotation.y = yaw + rot;
+			this.scene.add(obj);
+		};
+		const screen = () => createScreenTexture(pick(SCREEN_KINDS), index * 3 + Math.floor(rand() * 3));
+		const monitorWithNotes = () => {
+			const monitor = createMonitor(screen());
+			if (rand() < 0.45) {
+				const count = 1 + Math.floor(rand() * 2);
+				for (let i = 0; i < count; i++) {
+					const note = createStickyNote(pick(STICKY_COLORS));
+					note.position.set(0.25 - i * 0.07, 0.47 - i * 0.02, -0.053);
+					note.rotation.z = (rand() - 0.5) * 0.4;
+					monitor.add(note);
+				}
+			}
+			return monitor;
+		};
+
+		// Свободные места под мелочёвку [d, l] — слева и справа от клавиатуры.
+		let slots: [number, number][] = [
+			[-0.1, -0.52],
+			[0.12, -0.7],
+			[-0.2, -0.78],
+			[0.22, -0.58],
+			[-0.15, 0.62],
+			[0.1, 0.74],
+			[0.22, 0.52],
+			[-0.22, 0.8],
+		];
+
+		const setup = index % 3;
+		if (setup === 1) {
+			put(monitorWithNotes(), 0.2, -0.33, 0.25);
+			put(monitorWithNotes(), 0.2, 0.3, -0.25);
+			slots = slots.filter(([d, l]) => !(d > 0.12 && Math.abs(l) < 0.65));
+		} else {
+			put(monitorWithNotes(), 0.2, -0.05, (rand() - 0.5) * 0.1);
+			if (setup === 2) {
+				put(createLaptop(screen()), 0.0, -0.6, 0.35);
+				slots = slots.filter(([, l]) => l > 0);
+			}
+		}
+
+		put(createKeyboard(), -0.12, -0.05, (rand() - 0.5) * 0.08);
+		const leftHanded = index === 4;
+		const padL = leftHanded ? -0.42 : 0.3;
+		put(createMousePad(pick(['#23262b', '#2f3f5a', '#4a2f3a'])), -0.1, padL, (rand() - 0.5) * 0.2);
+		const mouse = createMouse(pick(['#2a2a2c', '#d8d8d4']));
+		put(mouse, -0.1 + (rand() - 0.5) * 0.04, padL + (rand() - 0.5) * 0.06, (rand() - 0.5) * 0.3);
+		mouse.position.y += 0.004;
+		if (leftHanded) slots = slots.filter(([, l]) => !(l < 0 && l > -0.6));
+
+		// Перемешиваем места и раздаём: кружка (или стакан навынос), потом 2–4 случайные мелочи.
+		for (let i = slots.length - 1; i > 0; i--) {
+			const j = Math.floor(rand() * (i + 1));
+			[slots[i], slots[j]] = [slots[j], slots[i]];
+		}
+		const items: (() => THREE.Object3D)[] = [];
+		const drink = rand();
+		if (drink < 0.65) items.push(() => createMug(pick(MUG_COLORS)));
+		else if (drink < 0.85) items.push(() => createPaperCup());
+		const pool: (() => THREE.Object3D)[] = [
+			() => createPaperStack(3 + Math.floor(rand() * 4)),
+			() => createNotebook(pick(['#2f4f7a', '#8a2f2a', '#3f6b45', '#26282b'])),
+			() => createStickyPad(pick(STICKY_COLORS)),
+			() => createDeskPlant(),
+			() => createHeadphones(pick(['#2a2b2e', '#e8e6e0', '#c42d22'])),
+			() => createWaterBottle(),
+			() => createPhone(),
+			() => createCan(pick(['#2c8a4a', '#c42d22', '#2c5aa0', '#e8e6e0'])),
+			() => createDeskLamp(pick(['#2a2b2e', '#f2f2ee', '#c9a23a'])),
+		];
+		const extras = 2 + Math.floor(rand() * 3);
+		for (let i = 0; i < extras; i++) items.push(pool.splice(Math.floor(rand() * pool.length), 1)[0]);
+		items.forEach((make, i) => {
+			if (i >= slots.length) return;
+			const [d, l] = slots[i];
+			put(make(), d, l, (rand() - 0.5) * 1.2);
+		});
 	}
 }
