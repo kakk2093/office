@@ -90,10 +90,14 @@ export class StartScreen {
 			p.style.margin = '0 0 10px';
 			text.appendChild(p);
 		}
+		// Управление — строкой под описанием, приглушённо.
+		const keys = document.createElement('div');
+		keys.textContent = 'WASD — ходить · Shift — спринт · Space — прыжок';
+		Object.assign(keys.style, { opacity: '0.7', fontSize: '16px' });
 		const button = document.createElement('button');
 		button.textContent = 'Старт';
 		button.className = 'start-button';
-		introStep.append(text, button);
+		introStep.append(text, keys, button);
 
 		const showIntro = () => {
 			if (this.noticeDone) return;
